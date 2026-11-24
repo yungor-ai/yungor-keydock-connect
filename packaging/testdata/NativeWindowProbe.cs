@@ -34,6 +34,11 @@ public static class KeyDockWindowProbe {
     [DllImport("dwmapi.dll")] private static extern int DwmFlush();
     [DllImport("user32.dll")] private static extern bool GetGUIThreadInfo(uint thread,ref GuiInfo info);
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern IntPtr FindWindowEx(IntPtr parent,IntPtr after,string cls,string caption);
+    [DllImport("user32.dll",EntryPoint="FindWindowExW")] private static extern IntPtr FindPopup(IntPtr parent,IntPtr after,IntPtr classAtom,IntPtr caption);
+    [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(Point point);
+    [DllImport("user32.dll")] private static extern bool SetCursorPos(int x,int y);
+    [DllImport("user32.dll")] private static extern void mouse_event(uint flags,uint dx,uint dy,uint data,UIntPtr extra);
+    [DllImport("user32.dll")] private static extern bool GetMenuItemRect(IntPtr hwnd,IntPtr menu,uint item,out Rect rect);
     [DllImport("user32.dll")] private static extern bool AllowSetForegroundWindow(uint process);
     [DllImport("user32.dll")] private static extern IntPtr GetShellWindow();
     [DllImport("user32.dll")] private static extern IntPtr GetProcessWindowStation();
@@ -59,14 +64,17 @@ public static class KeyDockWindowProbe {
     public static IntPtr TrayPopup(IntPtr sink){
         uint process;uint thread=GetWindowThreadProcessId(sink,out process);
         var gui=new GuiInfo{size=(uint)Marshal.SizeOf(typeof(GuiInfo))};GetGUIThreadInfo(thread,ref gui);
-        IntPtr found=IntPtr.Zero;
-        EnumWindows((h,a)=>{
-            if(!IsWindowVisible(h) || Class(h)!="#32768")return true;
+        // 0x8000 is Windows' documented menu-class atom. FindWindowEx also
+        // sees system popups omitted by the desktop-app-only EnumWindows API.
+        IntPtr h=IntPtr.Zero;
+        for(int i=0;i<100;i++){
+            h=FindPopup(IntPtr.Zero,h,(IntPtr)0x8000,IntPtr.Zero);
+            if(h==IntPtr.Zero)break;
+            if(!IsWindowVisible(h))continue;
             uint pid;uint tid=GetWindowThreadProcessId(h,out pid);
-            if(pid!=process && tid!=thread && (gui.owner!=sink || MenuLabel(h,0)!="打开 KeyDock Connect"))return true;
-            found=h;return false;
-        },IntPtr.Zero);
-        return found;
+            if(pid==process || tid==thread || (gui.owner==sink && MenuLabel(h,0)=="打开 KeyDock Connect"))return h;
+        }
+        return IntPtr.Zero;
     }
     [StructLayout(LayoutKind.Sequential)] private struct TrayItem {public uint size; public IntPtr window; public uint id; public Guid guid;}
     [StructLayout(LayoutKind.Sequential)] private struct Rect {public int left,top,right,bottom;}
@@ -103,6 +111,21 @@ public static class KeyDockWindowProbe {
         var item=new TrayItem {size=(uint)Marshal.SizeOf(typeof(TrayItem)),guid=new Guid("ad3e9258-1960-428e-a59f-407e2d9469e3")};
         return Shell_NotifyIconGetRect(ref item,out box)==0 && box.right>box.left && box.bottom>box.top;
     }
+    private static bool MouseClick(Point point,bool right) {
+        if(!SetCursorPos(point.X,point.Y))return false;
+        mouse_event(right?0x08U:0x02U,0,0,0,UIntPtr.Zero);
+        mouse_event(right?0x10U:0x04U,0,0,0,UIntPtr.Zero);
+        return true;
+    }
+    public static bool RightClickTrayIcon(IntPtr sink) {
+        Rect r;if(!TrayRect(sink,out r))return false;
+        var pt=new Point((r.left+r.right)/2,(r.top+r.bottom)/2);
+        uint shell=0,hit=0;
+        GetWindowThreadProcessId(GetShellWindow(),out shell);
+        GetWindowThreadProcessId(WindowFromPoint(pt),out hit);
+        if(shell==0 || shell!=hit)return false;
+        return MouseClick(pt,true);
+    }
     public static void OpenTrayMenu(IntPtr sink) {
         Rect box; int x,y;
         if(TrayRect(sink,out box)) { x=(box.left+box.right)/2; y=box.top-2; }
@@ -111,7 +134,15 @@ public static class KeyDockWindowProbe {
         if(!Post(sink,0x403,(IntPtr)((x & 65535)|((y & 65535)<<16)),(IntPtr)0x7B))throw new Exception("Could not post shell context menu callback");
     }
     public static string MenuLabel(IntPtr pop,int index){var s=new StringBuilder(200);IntPtr menu;if(Send(pop,0x1e1,IntPtr.Zero,IntPtr.Zero,TimedFlags,1200,out menu)==IntPtr.Zero)throw new TimeoutException("Native tray menu did not respond");GetMenuString(menu,(uint)index,s,s.Capacity,0x400);return s.ToString();}
-    public static void ExitViaMenu(IntPtr pop){Post(pop,0x100,(IntPtr)0x23,IntPtr.Zero); Post(pop,0x100,(IntPtr)0x0D,IntPtr.Zero);}
+    public static void ExitViaMenu(IntPtr pop){
+        IntPtr menu;Rect r;
+        if(Send(pop,0x1e1,IntPtr.Zero,IntPtr.Zero,TimedFlags,1200,out menu)!=IntPtr.Zero &&
+           GetMenuItemRect(IntPtr.Zero,menu,1,out r)){
+            var pt=new Point((r.left+r.right)/2,(r.top+r.bottom)/2);
+            if(WindowFromPoint(pt)==pop && MouseClick(pt,false))return;
+        }
+        Post(pop,0x100,(IntPtr)0x23,IntPtr.Zero);Post(pop,0x100,(IntPtr)0x0D,IntPtr.Zero);
+    }
     // Some runner sessions expose a window surface but no usable desktop
     // framebuffer. Reject empty captures instead of publishing a black PNG.
     private static bool HasContent(Bitmap image,Rectangle area) {

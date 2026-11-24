@@ -163,7 +163,12 @@ try {
     [KeyDockWindowProbe]::SelectTray($sink)
     $null = Wait-For 'visible native window after notification-area selection' { [KeyDockWindowProbe]::IsWindowVisible($handle) }
     Trace-Smoke ([KeyDockWindowProbe]::DesktopInfo($sink))
-    [KeyDockWindowProbe]::OpenTrayMenu($sink)
+    $physical = [KeyDockWindowProbe]::RightClickTrayIcon($sink)
+    Trace-Smoke "Shell icon accepted a physical right click: $physical"
+    if ($physical) { Start-Sleep -Milliseconds 400 }
+    if ([KeyDockWindowProbe]::TrayPopup($sink) -eq [IntPtr]::Zero) {
+        [KeyDockWindowProbe]::OpenTrayMenu($sink)
+    }
     Start-Sleep -Milliseconds 250
     Trace-Smoke ([KeyDockWindowProbe]::DesktopInfo($sink))
     $popup = Wait-For 'tray context menu' {
