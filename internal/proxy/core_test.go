@@ -86,26 +86,40 @@ func TestSS2022DataPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	runFixtureCore(t, core, clientProfile, clientPort)
-	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "encrypted loopback") }))
+	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "encrypted loopback") }))
 	defer target.Close()
 	u, _ := url.Parse("http://127.0.0.1:" + strconv.Itoa(clientPort))
-	tr := &http.Transport{Proxy: http.ProxyURL(u), DisableKeepAlives: true}
+	tr := target.Client().Transport.(*http.Transport).Clone()
+	tr.Proxy = http.ProxyURL(u)
+	tr.DisableKeepAlives = true
 	defer tr.CloseIdleConnections()
 	httpClient := http.Client{Transport: tr, Timeout: 4 * time.Second}
-	check := func() bool {
+	check := func() error {
 		resp, err := httpClient.Get(target.URL)
 		if err != nil {
-			return false
+			return err
 		}
 		defer resp.Body.Close()
 		body, err := io.ReadAll(resp.Body)
-		return err == nil && resp.StatusCode == 200 && string(body) == "encrypted loopback"
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode != http.StatusOK || string(body) != "encrypted loopback" {
+			return fmt.Errorf("expected loopback fixture response, got %s (%d bytes)", resp.Status, len(body))
+		}
+		return nil
 	}
-	if !check() {
-		t.Fatal("SS2022 test traffic did not reach the loopback endpoint")
+	// An open TCP port only establishes that the fixture process is listening.
+	// Wait for an actual encrypted round trip before testing loss of that peer.
+	deadline := time.Now().Add(6 * time.Second)
+	for err := check(); err != nil; err = check() {
+		if time.Now().After(deadline) {
+			t.Fatalf("SS2022 test traffic did not reach the TLS loopback endpoint: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 	stopServer()
-	if check() {
+	if err := check(); err == nil {
 		t.Fatal("encrypted route bypassed the stopped SS2022 server")
 	}
 }
