@@ -3,6 +3,7 @@ using System.Text;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
+using System.Windows.Forms;
 
 public static class KeyDockWindowProbe {
     private delegate bool EnumProc(IntPtr hwnd, IntPtr arg);
@@ -117,20 +118,51 @@ public static class KeyDockWindowProbe {
             found=h;return false;},IntPtr.Zero);
         return found;
     }
-    // Walk wraps each native STATIC in its own widget. The surrounding row
-    // groups the stage name, current state, and diagnostic message.
-    public static bool CheckStatus(IntPtr window,string stage,string state,string detail=null){
+    // Look for a value on the stage's visual row. This also works when the
+    // dashboard places all stages in a single Win32 layout grid.
+    private static IntPtr RowValue(IntPtr window,string stage,string value,bool exact){
         var name=Child(window,"label",stage);
-        if(name==IntPtr.Zero)return false;
-        var row=GetParent(GetParent(name));
-        if(row==IntPtr.Zero || Child(row,"label",state)==IntPtr.Zero)return false;
-        if(detail==null)return true;
-        bool found=false;
-        EnumChildWindows(row,(h,a)=>{
-            found=Class(h).Equals("static",StringComparison.OrdinalIgnoreCase) && IsWindowVisible(h) && Text(h).Contains(detail);
-            return !found;
+        Rect title;
+        if(name==IntPtr.Zero || !GetWindowRect(name,out title))return IntPtr.Zero;
+        var found=IntPtr.Zero;
+        EnumChildWindows(window,(h,a)=>{
+            Rect item;
+            if(!Class(h).Equals("static",StringComparison.OrdinalIgnoreCase) || !IsWindowVisible(h) || !GetWindowRect(h,out item))return true;
+            int center=(item.top+item.bottom)/2;
+            if(item.left<title.right || center<title.top || center>title.bottom)return true;
+            var text=Text(h);
+            if(exact?text!=value:!text.Contains(value))return true;
+            found=h;return false;
         },IntPtr.Zero);
         return found;
+    }
+    public static bool CheckStatus(IntPtr window,string stage,string state,string detail){
+        return RowValue(window,stage,state,true)!=IntPtr.Zero &&
+            (string.IsNullOrEmpty(detail) || RowValue(window,stage,detail,false)!=IntPtr.Zero);
+    }
+    public static void AssertReadableLabel(IntPtr window,string text){
+        var label=Child(window,"label",text);
+        Rect client;
+        if(label==IntPtr.Zero || !GetClientRect(label,out client))throw new Exception("Missing visible label: "+text);
+        using(var g=Graphics.FromHwnd(label))
+        using(var font=new Font("Microsoft YaHei UI",10f)){
+            var flags=TextFormatFlags.SingleLine|TextFormatFlags.NoPadding|TextFormatFlags.NoPrefix;
+            var required=TextRenderer.MeasureText(g,text,font,Size.Empty,flags).Width;
+            int available=client.right-client.left;
+            if(available+2<required)throw new Exception(String.Format("Label is clipped ({0}px available, {1}px needed): {2}",available,required,text));
+        }
+    }
+    public static void AssertAlignedChecks(IntPtr window){
+        string[] stages={"设备授权","Codex 配置","模型连通","代理连通"};
+        int first=-1;
+        foreach(var stage in stages){
+            var state=RowValue(window,stage,"完成",true);
+            if(state==IntPtr.Zero)state=RowValue(window,stage,"跳过",true);
+            Rect bounds;
+            if(state==IntPtr.Zero || !GetWindowRect(state,out bounds))throw new Exception("Missing check badge: "+stage);
+            if(first<0)first=bounds.left;
+            if(Math.Abs(bounds.left-first)>2)throw new Exception("Misaligned connection check badge: "+stage);
+        }
     }
     public static void Enter(IntPtr h,string v){IntPtr result;if(h==IntPtr.Zero||WriteText(h,12,IntPtr.Zero,v,TimedFlags,2500,out result)==IntPtr.Zero||result==IntPtr.Zero)throw new Exception("Native edit control did not accept input");}
     public static void Click(IntPtr h){if(h==IntPtr.Zero)throw new Exception("Native button not available");IntPtr result;if(Send(h,0xF5,IntPtr.Zero,IntPtr.Zero,TimedFlags,4000,out result)==IntPtr.Zero)throw new TimeoutException("Native button did not respond");}

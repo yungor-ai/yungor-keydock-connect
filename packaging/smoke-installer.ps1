@@ -114,7 +114,7 @@ try {
     # Compile against Windows PowerShell's .NET Framework for System.Drawing.
     # Run this smoke in ordinary powershell.exe (set by the workflow).
     Trace-Smoke 'Compiling Win32 window probe'
-    Add-Type -Path 'packaging/testdata/NativeWindowProbe.cs' -ReferencedAssemblies @('System.dll','System.Drawing.dll')
+    Add-Type -Path 'packaging/testdata/NativeWindowProbe.cs' -ReferencedAssemblies @('System.dll','System.Drawing.dll','System.Windows.Forms.dll')
     Trace-Smoke 'Starting installed native application'
     $nativeStderr = Join-Path $testRoot 'native.stderr'
     $process = Start-Process $exe -PassThru -RedirectStandardError $nativeStderr
@@ -159,6 +159,7 @@ try {
         $ready -ne [IntPtr]::Zero
     }
     [KeyDockWindowProbe]::Capture($handle,(Join-Path $shots '03-without-subscription.png'),'设备接入')
+    [KeyDockWindowProbe]::AssertAlignedChecks($handle)
 
     # Give the same paired device a loopback SS2022 node. Resync with the
     # saved Device Key and exercise the two system-proxy actions from the UI.
@@ -183,6 +184,8 @@ try {
     $shot = Join-Path (Resolve-Path dist/installer).Path 'KeyDockConnect-window.png'
     $connectedShot = Join-Path $shots '03-connected.png'
     [KeyDockWindowProbe]::Capture($handle,$connectedShot,'设备接入')
+    [KeyDockWindowProbe]::AssertReadableLabel($handle,'演示工作站 · synthetic-model')
+    [KeyDockWindowProbe]::AssertReadableLabel($handle,'启用后，使用系统代理的应用流量将按订阅规则分流。')
     Copy-Item $connectedShot $shot -Force
     [KeyDockWindowProbe]::Click([KeyDockWindowProbe]::Child($handle,'button','启用系统代理'))
     $turnOff = Wait-For 'enabled Windows proxy and matching UI state' {
@@ -191,7 +194,9 @@ try {
     }
     $inet = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
     if ($inet.ProxyEnable -ne 1 -or $inet.ProxyServer -notmatch '^127\.0\.0\.1:[0-9]+$') { throw 'UI proxy status does not match Windows Internet Settings.' }
-    $throughSS = & "$env:SystemRoot\System32\curl.exe" -fsS --max-time 8 --noproxy unused.invalid --proxy "http://$($inet.ProxyServer)" "$origin/check-proxy"
+    # The ephemeral fixture CA has no revocation service. Schannel still
+    # validates the certificate chain and host and rejects revoked certificates.
+    $throughSS = & "$env:SystemRoot\System32\curl.exe" -fsS --ssl-revoke-best-effort --max-time 8 --noproxy unused.invalid --proxy "http://$($inet.ProxyServer)" "$origin/check-proxy"
     if ($LASTEXITCODE -ne 0 -or $throughSS -ne 'KeyDock fixture reached') { throw 'The enabled system proxy did not relay the local TLS fixture over SS2022.' }
     [KeyDockWindowProbe]::Capture($handle,(Join-Path $shots '05-proxy-enabled.png'),'设备接入')
     [KeyDockWindowProbe]::Click($turnOff)

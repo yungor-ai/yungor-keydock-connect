@@ -16,19 +16,20 @@ import (
 var trayGUID = windows.GUID{Data1: 0xad3e9258, Data2: 0x1960, Data3: 0x428e, Data4: [8]byte{0xa5, 0x9f, 0x40, 0x7e, 0x2d, 0x94, 0x69, 0xe3}}
 
 type nativeWindow struct {
-	app                                    *walk.Application
-	controller                             *desktop.Controller
-	window                                 *walk.MainWindow
-	server, key                            *walk.LineEdit
-	device, message, proxyState, proxyHint *walk.Label
-	rows                                   []checkRow
-	colors                                 windowColors
-	connect, proxy, launch, restore        *walk.PushButton
-	state                                  desktop.State
-	cleaned                                bool
-	results                                map[string]desktop.Check
-	cancel                                 context.CancelFunc
-	quitting                               bool
+	app                             *walk.Application
+	controller                      *desktop.Controller
+	window                          *walk.MainWindow
+	server, key                     *walk.LineEdit
+	device, message, proxyHint      *walk.TextLabel
+	proxyState                      *walk.Label
+	rows                            []checkRow
+	colors                          windowColors
+	connect, proxy, launch, restore *walk.PushButton
+	state                           desktop.State
+	cleaned                         bool
+	results                         map[string]desktop.Check
+	cancel                          context.CancelFunc
+	quitting                        bool
 }
 
 func runWindow(dir string, controller *desktop.Controller) error {
