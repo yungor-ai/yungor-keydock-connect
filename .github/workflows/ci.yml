@@ -49,8 +49,18 @@ jobs:
         shell: pwsh
         run: ./packaging/build-installer.ps1
       - name: Verify installed application and safe uninstall
+        timeout-minutes: 8
         shell: powershell
         run: ./packaging/smoke-installer.ps1
+      - name: Preserve available Windows UI evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: KeyDockConnect-Windows-UI
+          path: |
+            dist/installer/smoke-diagnostics.txt
+            dist/installer/screenshots/*.png
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: KeyDockConnect-windows-x64

@@ -5,12 +5,34 @@ if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows'
     throw 'This installation smoke test requires a disposable GitHub-hosted Windows runner.'
 }
 
+$evidence = Join-Path (Resolve-Path dist/installer).Path 'smoke-diagnostics.txt'
+function Trace-Smoke([string]$message) {
+    $line = '{0:u} {1}' -f [datetime]::UtcNow, $message
+    Write-Host $line
+    Add-Content -Encoding UTF8 -LiteralPath $evidence -Value $line
+}
+function Invoke-SmokeProcess([string]$label, [string]$file, [string[]]$arguments, [int]$seconds) {
+    Trace-Smoke "Starting $label"
+    $start = New-Object Diagnostics.ProcessStartInfo
+    $start.FileName = $file
+    $start.Arguments = [string]::Join(' ', $arguments)
+    $start.UseShellExecute = $false
+    $p = [Diagnostics.Process]::Start($start)
+    if (-not $p.WaitForExit($seconds * 1000)) {
+        Trace-Smoke "Timeout in $label (PID $($p.Id))"
+        & taskkill.exe /PID $p.Id /T /F | Out-Null
+        throw "$label did not exit within $seconds seconds"
+    }
+    Trace-Smoke "$label exited with $($p.ExitCode)"
+    return $p.ExitCode
+}
 $installDir = Join-Path $env:LOCALAPPDATA 'Programs\KeyDock Connect'
 if (Test-Path $installDir) { throw 'The install location must be empty on the disposable runner.' }
 $installer = (Resolve-Path 'dist/installer/KeyDockConnect-Setup-windows-x64.exe').Path
 $flags = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
-$setup = Start-Process $installer -ArgumentList $flags -Wait -PassThru
-if ($setup.ExitCode -ne 0) { throw "Installation failed ($($setup.ExitCode))." }
+$setupCode = Invoke-SmokeProcess 'per-user installation' $installer $flags 90
+if ($setupCode -ne 0) { throw "Installation failed ($setupCode)." }
+Trace-Smoke 'Checking installed files against the staged payload'
 
 # Verify installed bytes, including all notices, source archives and routing data.
 $stage = (Resolve-Path dist/app).Path
@@ -34,9 +56,11 @@ $original = "# synthetic preexisting Codex settings`nmodel = `"previous-model`"`
 [IO.File]::WriteAllText($config, $original)
 $originalHash = (Get-FileHash $config).Hash
 
-# Use only a throwaway current-user test CA and a loopback HTTPS fixture.
+# The disposable runner trusts one temporary CA in its machine store. The
+# current-user root store can request interactive approval on the desktop.
 # No employee account, subscription, proxy, or external model is contacted.
 $fixtureExe = Join-Path $testRoot 'fixture.exe'
+Trace-Smoke 'Building synthetic loopback HTTPS fixture'
 go build -o $fixtureExe ./packaging/testdata/gateway.go
 if ($LASTEXITCODE -ne 0) { throw 'Failed to build local TLS fixture.' }
 $fixture = Start-Process $fixtureExe -ArgumentList ('"' + $testRoot + '"') -PassThru
@@ -44,22 +68,31 @@ $authority = $null
 $process = $null
 $encoding = [Text.Encoding]::UTF8
 function Wait-For($description, [scriptblock]$condition) {
-    for ($i=0; $i -lt 160; $i++) {
+    Trace-Smoke "Waiting for $description"
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    while ($clock.Elapsed.TotalSeconds -lt 20) {
         $value = & $condition
-        if ($value) { return $value }
+        if ($value) { Trace-Smoke "Observed $description"; return $value }
         Start-Sleep -Milliseconds 125
     }
+    Trace-Smoke "Timed out waiting for $description"
     throw "Timed out waiting for $description"
 }
 try {
     $null = Wait-For 'test gateway' { Test-Path (Join-Path $testRoot 'fixture-origin') }
     $origin = Get-Content -Raw (Join-Path $testRoot 'fixture-origin')
-    $authority = Import-Certificate -FilePath (Join-Path $testRoot 'test-ca.cer') -CertStoreLocation 'Cert:\CurrentUser\Root'
+    $caPath = Join-Path $testRoot 'test-ca.cer'
+    $authority = [Security.Cryptography.X509Certificates.X509Certificate2]::new([string]$caPath)
+    $certCode = Invoke-SmokeProcess 'trust disposable HTTPS fixture CA' 'certutil.exe' @('-f','-addstore','Root',('"' + $caPath + '"')) 20
+    if ($certCode -ne 0) { throw 'Could not install the disposable fixture CA.' }
     $profile = @{ BaseURL = "$origin/v1"; Key = 'synthetic-ci-helper-key' }
     # Compile against Windows PowerShell's .NET Framework for System.Drawing.
     # Run this smoke in ordinary powershell.exe (set by the workflow).
+    Trace-Smoke 'Compiling Win32 window probe'
     Add-Type -Path 'packaging/testdata/NativeWindowProbe.cs' -ReferencedAssemblies @('System.dll','System.Drawing.dll')
+    Trace-Smoke 'Starting installed native application'
     $process = Start-Process $exe -PassThru
+    Trace-Smoke "Started native PID $($process.Id)"
     $handle = Wait-For 'native Win32 setup window' {
         if ($process.HasExited) { throw 'Application exited before showing its window.' }
         $h = [KeyDockWindowProbe]::Window($process.Id,$null,'KeyDock Connect')
@@ -99,14 +132,24 @@ try {
     $connectedShot = Join-Path $shots '03-connected.png'
     [KeyDockWindowProbe]::Capture($handle,$connectedShot)
     Copy-Item $connectedShot $shot -Force
-    $credential = (& $exe --credential | Out-String).Trim()
-    if ($credential -cne $profile.Key -or $LASTEXITCODE -ne 0) { throw 'Installed credential helper failed.' }
+    Trace-Smoke 'Checking installed DPAPI credential helper'
+    $info = New-Object Diagnostics.ProcessStartInfo
+    $info.FileName = $exe
+    $info.Arguments = '--credential'
+    $info.UseShellExecute = $false
+    $info.RedirectStandardOutput = $true
+    $helper = [Diagnostics.Process]::Start($info)
+    if (-not $helper.WaitForExit(8000)) { $helper.Kill(); throw 'Credential helper did not exit' }
+    if ($helper.ExitCode -ne 0 -or $helper.StandardOutput.ReadToEnd().Trim() -cne $profile.Key) { throw 'Installed credential helper failed.' }
+    $helper.Dispose()
 
-    $runningAttempt = Start-Process $uninstaller -ArgumentList $flags -Wait -PassThru
-    if ($runningAttempt.ExitCode -eq 0 -or -not (Test-Path $exe)) { throw 'Uninstall must stop while KeyDock Connect is running.' }
+    $runningAttempt = Invoke-SmokeProcess 'uninstall while app is open' $uninstaller $flags 35
+    if ($runningAttempt -eq 0 -or -not (Test-Path $exe)) { throw 'Uninstall must stop while KeyDock Connect is running.' }
     [KeyDockWindowProbe]::HideViaClose($handle)
     $null = Wait-For 'hidden native window' { -not [KeyDockWindowProbe]::IsWindowVisible($handle) }
-    $second = Start-Process $exe -PassThru -Wait
+    Trace-Smoke 'Testing second launch'
+    $second = Start-Process $exe -PassThru
+    if (-not $second.WaitForExit(12000)) { $second.Kill(); throw 'Second launch timed out' }
     if ($second.ExitCode -ne 0) { throw 'Second launch failed to signal the primary window.' }
     $null = Wait-For 'same primary HWND reopened by second launch' { [KeyDockWindowProbe]::IsWindowVisible($handle) }
     [KeyDockWindowProbe]::HideViaClose($handle)
@@ -133,18 +176,33 @@ try {
     if ($externalEdit -ceq $encoding.GetString($managed)) { throw 'No managed base URL to edit.' }
     [IO.File]::WriteAllText($config, $externalEdit)
     $modifiedHash = (Get-FileHash $config).Hash
-    $conflict = Start-Process $uninstaller -ArgumentList $flags -Wait -PassThru
-    if ($conflict.ExitCode -eq 0 -or -not (Test-Path $exe) -or (Get-FileHash $config).Hash -ne $modifiedHash) {
+    $conflict = Invoke-SmokeProcess 'uninstall with a conflicting edit' $uninstaller $flags 35
+    if ($conflict -eq 0 -or -not (Test-Path $exe) -or (Get-FileHash $config).Hash -ne $modifiedHash) {
         throw 'Uninstall did not preserve the conflicting Codex configuration and helper.'
     }
     [IO.File]::WriteAllBytes($config, $managed)
-    $uninstall = Start-Process $uninstaller -ArgumentList $flags -Wait -PassThru
-    if ($uninstall.ExitCode -ne 0 -or (Test-Path $exe) -or (Get-FileHash $config).Hash -ne $originalHash) {
+    $uninstall = Invoke-SmokeProcess 'clean uninstall' $uninstaller $flags 45
+    if ($uninstall -ne 0 -or (Test-Path $exe) -or (Get-FileHash $config).Hash -ne $originalHash) {
         throw 'Uninstall did not remove the program and restore the original Codex configuration.'
     }
     Write-Host 'Verified native Windows setup, authenticated HTTPS device enrollment, model probe, credential helper, close-to-tray, reopening, tray actions and guarded uninstall.'
+} catch {
+    Trace-Smoke ('Failure: ' + $_.Exception.Message)
+    if ($null -ne $process) {
+        $process.Refresh()
+        if ($process.HasExited) { Trace-Smoke "Native PID $($process.Id) exited with $($process.ExitCode)" }
+        else { Trace-Smoke "Native PID $($process.Id), main HWND $($process.MainWindowHandle)" }
+    }
+    throw
 } finally {
-    if ($null -ne $process -and -not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
-    if (-not $fixture.HasExited) { $fixture.Kill(); $fixture.WaitForExit() }
-    if ($null -ne $authority) { Remove-Item ('Cert:\CurrentUser\Root\' + $authority.Thumbprint) }
+    if ($null -ne $process -and -not $process.HasExited) { $process.Kill(); $null = $process.WaitForExit(5000) }
+    if (-not $fixture.HasExited) { $fixture.Kill(); $null = $fixture.WaitForExit(5000) }
+    if ($null -ne $authority) {
+        $path = 'Cert:\LocalMachine\Root\' + $authority.Thumbprint
+        if (Test-Path -LiteralPath $path) {
+            $removeCode = Invoke-SmokeProcess 'remove disposable HTTPS fixture CA' 'certutil.exe' @('-delstore','Root',$authority.Thumbprint) 15
+            if ($removeCode -ne 0) { throw 'Could not remove the disposable fixture CA' }
+        }
+        $authority.Dispose()
+    }
 }

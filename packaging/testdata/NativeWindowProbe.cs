@@ -10,9 +10,11 @@ public static class KeyDockWindowProbe {
     [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr parent, EnumProc cb, IntPtr unused);
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint process);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetClassName(IntPtr hwnd,StringBuilder str,int size);
-    [DllImport("user32.dll", CharSet=CharSet.Unicode, EntryPoint="SendMessageW")] private static extern IntPtr ReadText(IntPtr hwnd,uint msg,IntPtr size,StringBuilder text);
-    [DllImport("user32.dll", CharSet=CharSet.Unicode, EntryPoint="SendMessageW")] private static extern IntPtr WriteText(IntPtr hwnd,uint msg,IntPtr size,string text);
-    [DllImport("user32.dll", EntryPoint="SendMessageW")] private static extern IntPtr Send(IntPtr hwnd,uint msg,IntPtr w,IntPtr l);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetWindowText(IntPtr hwnd,StringBuilder text,int size);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, EntryPoint="SendMessageTimeoutW")] private static extern IntPtr ReadText(IntPtr hwnd,uint msg,IntPtr size,StringBuilder text,uint flags,uint ms,out IntPtr result);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, EntryPoint="SendMessageTimeoutW")] private static extern IntPtr WriteText(IntPtr hwnd,uint msg,IntPtr size,string text,uint flags,uint ms,out IntPtr result);
+    [DllImport("user32.dll", EntryPoint="SendMessageTimeoutW")] private static extern IntPtr Send(IntPtr hwnd,uint msg,IntPtr w,IntPtr l,uint flags,uint ms,out IntPtr result);
+    private const uint TimedFlags=0x22; // SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT
     [DllImport("user32.dll", EntryPoint="PostMessageW")] private static extern bool Post(IntPtr hwnd,uint msg,IntPtr w,IntPtr l);
     [DllImport("user32.dll", EntryPoint="GetWindowLongW")] private static extern int GetStyle(IntPtr hwnd,int index);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
@@ -26,11 +28,15 @@ public static class KeyDockWindowProbe {
     [StructLayout(LayoutKind.Sequential)] private struct TrayItem {public uint size; public IntPtr window; public uint id; public Guid guid;}
     [StructLayout(LayoutKind.Sequential)] private struct Rect {public int left,top,right,bottom;}
     private static string Class(IntPtr h){var s=new StringBuilder(128);GetClassName(h,s,s.Capacity);return s.ToString();}
-    public static string Text(IntPtr h){var s=new StringBuilder(8192);ReadText(h,13,(IntPtr)s.Capacity,s);return s.ToString();}
+    public static string Text(IntPtr h){
+        var s=new StringBuilder(8192);IntPtr result;
+        return h!=IntPtr.Zero && ReadText(h,13,(IntPtr)s.Capacity,s,TimedFlags,750,out result)!=IntPtr.Zero?s.ToString():"";
+    }
+    private static string Caption(IntPtr h){var s=new StringBuilder(300);GetWindowText(h,s,s.Capacity);return s.ToString();}
     public static IntPtr Window(int process,string cls,string caption){
         IntPtr found=IntPtr.Zero;
         EnumWindows((h,a)=>{uint pid;GetWindowThreadProcessId(h,out pid);
-            if(pid!=process || (!string.IsNullOrEmpty(cls) && Class(h)!=cls) || (!string.IsNullOrEmpty(caption) && Text(h)!=caption)) return true;
+            if(pid!=process || (!string.IsNullOrEmpty(cls) && Class(h)!=cls) || (!string.IsNullOrEmpty(caption) && Caption(h)!=caption)) return true;
             found=h;return false;},IntPtr.Zero);
         return found;
     }
@@ -46,8 +52,8 @@ public static class KeyDockWindowProbe {
             found=h;return false;},IntPtr.Zero);
         return found;
     }
-    public static void Enter(IntPtr h,string v){if(h==IntPtr.Zero||WriteText(h,12,IntPtr.Zero,v)==IntPtr.Zero)throw new Exception("Native edit control did not accept input");}
-    public static void Click(IntPtr h){if(h==IntPtr.Zero)throw new Exception("Native button not available");Send(h,0xF5,IntPtr.Zero,IntPtr.Zero);}
+    public static void Enter(IntPtr h,string v){IntPtr result;if(h==IntPtr.Zero||WriteText(h,12,IntPtr.Zero,v,TimedFlags,2500,out result)==IntPtr.Zero||result==IntPtr.Zero)throw new Exception("Native edit control did not accept input");}
+    public static void Click(IntPtr h){if(h==IntPtr.Zero)throw new Exception("Native button not available");IntPtr result;if(Send(h,0xF5,IntPtr.Zero,IntPtr.Zero,TimedFlags,4000,out result)==IntPtr.Zero)throw new TimeoutException("Native button did not respond");}
     public static void HideViaClose(IntPtr h){Post(h,0x10,IntPtr.Zero,IntPtr.Zero);}
     public static void SelectTray(IntPtr sink){if(sink==IntPtr.Zero)throw new Exception("No native tray callback window");Post(sink,0x403,IntPtr.Zero,(IntPtr)0x400);}
     private static bool TrayRect(IntPtr sink,out Rect box){
@@ -60,7 +66,7 @@ public static class KeyDockWindowProbe {
         else { x=GetSystemMetrics(0)-24; y=GetSystemMetrics(1)-48; }
         Post(sink,0x403,(IntPtr)((x & 65535)|((y & 65535)<<16)),(IntPtr)0x7B);
     }
-    public static string MenuLabel(IntPtr pop,int index){var s=new StringBuilder(200);var menu=Send(pop,0x1e1,IntPtr.Zero,IntPtr.Zero);GetMenuString(menu,(uint)index,s,s.Capacity,0x400);return s.ToString();}
+    public static string MenuLabel(IntPtr pop,int index){var s=new StringBuilder(200);IntPtr menu;if(Send(pop,0x1e1,IntPtr.Zero,IntPtr.Zero,TimedFlags,1200,out menu)==IntPtr.Zero)throw new TimeoutException("Native tray menu did not respond");GetMenuString(menu,(uint)index,s,s.Capacity,0x400);return s.ToString();}
     public static void ExitViaMenu(IntPtr pop){Post(pop,0x100,(IntPtr)0x23,IntPtr.Zero); Post(pop,0x100,(IntPtr)0x0D,IntPtr.Zero);}
     // Some runner sessions expose a window surface but no usable desktop
     // framebuffer. Reject empty captures instead of publishing a black PNG.
@@ -75,7 +81,15 @@ public static class KeyDockWindowProbe {
         }
         return false;
     }
-    public static void Capture(IntPtr hwnd,string path){
+    private static void BoundedCapture(Action capture){
+        Exception failure=null;
+        var thread=new System.Threading.Thread(new System.Threading.ThreadStart(delegate(){try{capture();}catch(Exception e){failure=e;}}));
+        thread.IsBackground=true;thread.Start();
+        if(!thread.Join(8000))throw new TimeoutException("Native screenshot timed out");
+        if(failure!=null)throw new Exception("Native capture failed",failure);
+    }
+    public static void Capture(IntPtr hwnd,string path){BoundedCapture(delegate(){CaptureWindow(hwnd,path);});}
+    private static void CaptureWindow(IntPtr hwnd,string path){
         DwmFlush();
         Rect r;if(!GetWindowRect(hwnd,out r))throw new Exception("Cannot read native window bounds");
         using(var img=new Bitmap(r.right-r.left,r.bottom-r.top,PixelFormat.Format24bppRgb)){
@@ -92,7 +106,8 @@ public static class KeyDockWindowProbe {
             img.Save(path,ImageFormat.Png);
         }
     }
-    public static void CaptureTray(IntPtr popup,IntPtr sink,string path) {
+    public static void CaptureTray(IntPtr popup,IntPtr sink,string path){BoundedCapture(delegate(){CaptureTrayWindow(popup,sink,path);});}
+    private static void CaptureTrayWindow(IntPtr popup,IntPtr sink,string path) {
         DwmFlush();
         Rect p;if(!GetWindowRect(popup,out p))throw new Exception("Cannot read the open tray menu");
         var menu=Rectangle.FromLTRB(p.left,p.top,p.right,p.bottom);
@@ -114,6 +129,6 @@ public static class KeyDockWindowProbe {
             } catch(System.ComponentModel.Win32Exception) { /* Try the actual popup HWND below. */ }
         }
         // No visible shell pixels in this session. Capture the native menu itself.
-        Capture(popup,path);
+        CaptureWindow(popup,path);
     }
 }
