@@ -27,7 +27,7 @@ public static class KeyDockWindowProbe {
     public static IntPtr Window(int process,string cls,string caption){
         IntPtr found=IntPtr.Zero;
         EnumWindows((h,a)=>{uint pid;GetWindowThreadProcessId(h,out pid);
-            if(pid!=process || (cls!=null && Class(h)!=cls) || (caption!=null && Text(h)!=caption)) return true;
+            if(pid!=process || (!string.IsNullOrEmpty(cls) && Class(h)!=cls) || (!string.IsNullOrEmpty(caption) && Text(h)!=caption)) return true;
             found=h;return false;},IntPtr.Zero);
         return found;
     }
