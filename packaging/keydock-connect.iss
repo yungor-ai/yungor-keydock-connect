@@ -1,13 +1,14 @@
 ﻿#define AppName "KeyDock Connect"
 #define AppExe "KeyDockConnect.exe"
 #ifndef AppVersion
-  #define AppVersion "0.2.0"
+  #error "Run packaging/build-installer.ps1 to supply the release version."
 #endif
 
 [Setup]
 AppId={{1F72CD21-C12E-40B7-9D93-98527EF65242}
 AppName={#AppName}
 AppVersion={#AppVersion}
+VersionInfoVersion={#AppVersion}
 AppPublisher=Yungor
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64os

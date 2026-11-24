@@ -29,6 +29,11 @@ function Invoke-SmokeProcess([string]$label, [string]$file, [string[]]$arguments
 $installDir = Join-Path $env:LOCALAPPDATA 'Programs\KeyDock Connect'
 if (Test-Path $installDir) { throw 'The install location must be empty on the disposable runner.' }
 $installer = (Resolve-Path 'dist/installer/KeyDockConnect-Setup-windows-x64.exe').Path
+$version = (Get-Content -Raw -LiteralPath 'VERSION').Trim()
+$versionInfo = (Get-Item -LiteralPath $installer).VersionInfo
+if ("$($versionInfo.FileMajorPart).$($versionInfo.FileMinorPart).$($versionInfo.FileBuildPart)" -ne $version) {
+    throw 'The Windows installer file version differs from VERSION.'
+}
 $flags = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
 $setupCode = Invoke-SmokeProcess 'per-user installation' $installer $flags 90
 if ($setupCode -ne 0) { throw "Installation failed ($setupCode)." }
@@ -58,20 +63,39 @@ $originalHash = (Get-FileHash $config).Hash
 
 # The disposable runner trusts one temporary CA in its machine store. The
 # current-user root store can request interactive approval on the desktop.
-# No employee account, subscription, proxy, or external model is contacted.
+# All credentials, the SS peer, and the model service are local fixtures. The
+# installed application also performs its normal public HTTPS 204 probe.
 $fixtureExe = Join-Path $testRoot 'fixture.exe'
 Trace-Smoke 'Building synthetic loopback HTTPS fixture'
 go build -o $fixtureExe ./packaging/testdata/gateway.go
 if ($LASTEXITCODE -ne 0) { throw 'Failed to build local TLS fixture.' }
-$fixture = Start-Process $fixtureExe -ArgumentList ('"' + $testRoot + '"') -PassThru
+$listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+$listener.Start()
+$ssPort = $listener.LocalEndpoint.Port
+$listener.Stop()
+$ssConfig = Join-Path $testRoot 'loopback-ss.yaml'
+[IO.File]::WriteAllText($ssConfig, @"
+mode: direct
+log-level: silent
+listeners:
+  - name: fixture-ss
+    type: shadowsocks
+    listen: 127.0.0.1
+    port: $ssPort
+    cipher: 2022-blake3-aes-128-gcm
+    password: "AAAAAAAAAAAAAAAAAAAAAA=="
+    users: {test-device: "AQEBAQEBAQEBAQEBAQEBAQ=="}
+"@)
+$fixture = Start-Process $fixtureExe -ArgumentList ('"{0}" {1}' -f $testRoot,$ssPort) -PassThru
+$peer = $null
 $authority = $null
 $process = $null
 $exitHandle = $null
 $encoding = [Text.Encoding]::UTF8
-function Wait-For($description, [scriptblock]$condition) {
+function Wait-For($description, [scriptblock]$condition, [int]$seconds=20) {
     Trace-Smoke "Waiting for $description"
     $clock = [Diagnostics.Stopwatch]::StartNew()
-    while ($clock.Elapsed.TotalSeconds -lt 20) {
+    while ($clock.Elapsed.TotalSeconds -lt $seconds) {
         $value = & $condition
         if ($value) { Trace-Smoke "Observed $description"; return $value }
         Start-Sleep -Milliseconds 125
@@ -98,7 +122,7 @@ try {
     Trace-Smoke "Started native PID $($process.Id)"
     $handle = Wait-For 'native Win32 setup window' {
         if ($process.HasExited) { throw 'Application exited before showing its window.' }
-        $h = [KeyDockWindowProbe]::Window($process.Id,$null,'KeyDock Connect')
+        $h = [KeyDockWindowProbe]::Window($process.Id,$null,"KeyDock Connect v$version")
         if ($h -ne [IntPtr]::Zero -and [KeyDockWindowProbe]::IsWindowVisible($h)) { $h }
     }
     $initialSink = [KeyDockWindowProbe]::Window($process.Id,'WalkNotifyIconSink',$null)
@@ -111,32 +135,70 @@ try {
         if ($h -ne [IntPtr]::Zero) { $h }
     }
     $null = Wait-For 'initial connection status' {
-        [KeyDockWindowProbe]::Text([KeyDockWindowProbe]::Child($handle,'checks','')) -match '设备授权 · 待检查'
+        [KeyDockWindowProbe]::CheckStatus($handle,'设备授权','待检查',$null) -and
+        [KeyDockWindowProbe]::Child($handle,'label','系统代理未启用') -ne [IntPtr]::Zero
     }
     [KeyDockWindowProbe]::Capture($handle,(Join-Path $shots '01-first-launch.png'),'设备接入')
     [KeyDockWindowProbe]::Enter($serverField,$origin)
     [KeyDockWindowProbe]::Enter($keyField,'intentionally-wrong-synthetic-key')
     [KeyDockWindowProbe]::Click($startButton)
     $null = Wait-For 'rejected device credential and enabled retry' {
-        $checks = [KeyDockWindowProbe]::Text([KeyDockWindowProbe]::Child($handle,'checks',''))
         $retry = [KeyDockWindowProbe]::Child($handle,'button','连接并测试')
-        $checks -match '设备授权 · 失败' -and $checks -match '401' -and $retry -ne [IntPtr]::Zero
+        [KeyDockWindowProbe]::CheckStatus($handle,'设备授权','失败','401') -and $retry -ne [IntPtr]::Zero
     }
     [KeyDockWindowProbe]::Capture($handle,(Join-Path $shots '02-device-key-error.png'),'设备接入')
     [KeyDockWindowProbe]::Enter($keyField,'fixture-device-key')
     [KeyDockWindowProbe]::Click($startButton)
     $null = Wait-For 'four native connection checks' {
-        $checks = [KeyDockWindowProbe]::Text([KeyDockWindowProbe]::Child($handle,'checks',''))
         $ready = [KeyDockWindowProbe]::Child($handle,'button','打开 Codex')
-        $checks -match '设备授权 · 完成' -and $checks -match 'Codex 配置 · 完成' -and
-        $checks -match '模型连通 · 完成' -and $checks -match '代理连通 · 跳过' -and $ready -ne [IntPtr]::Zero
+        [KeyDockWindowProbe]::CheckStatus($handle,'设备授权','完成','演示工作站') -and
+        [KeyDockWindowProbe]::CheckStatus($handle,'Codex 配置','完成','synthetic-model') -and
+        [KeyDockWindowProbe]::CheckStatus($handle,'模型连通','完成',$null) -and
+        [KeyDockWindowProbe]::CheckStatus($handle,'代理连通','跳过','未分配') -and
+        [KeyDockWindowProbe]::Child($handle,'label','演示工作站 · synthetic-model') -ne [IntPtr]::Zero -and
+        $ready -ne [IntPtr]::Zero
     }
+    [KeyDockWindowProbe]::Capture($handle,(Join-Path $shots '03-without-subscription.png'),'设备接入')
+
+    # Give the same paired device a loopback SS2022 node. Resync with the
+    # saved Device Key and exercise the two system-proxy actions from the UI.
+    $peer = Start-Process (Join-Path $installDir 'core\mihomo.exe') -ArgumentList ('-d "{0}" -f "{1}"' -f $testRoot,$ssConfig) -PassThru
+    $null = Wait-For 'local SS2022 fixture listener' {
+        if ($peer.HasExited) { throw 'Loopback SS peer exited early.' }
+        $client = [Net.Sockets.TcpClient]::new()
+        try { $client.Connect('127.0.0.1',$ssPort); $true } catch { $false } finally { $client.Dispose() }
+    }
+    $null = New-Item -ItemType File -Path (Join-Path $testRoot 'subscription-enabled')
+    [KeyDockWindowProbe]::Click($startButton)
+    $null = Wait-For 'assigned SS subscription tested without enabling Windows proxy' {
+        $canEnable = [KeyDockWindowProbe]::Child($handle,'button','启用系统代理')
+        $off = [KeyDockWindowProbe]::Child($handle,'label','系统代理未启用')
+        $done = [KeyDockWindowProbe]::CheckStatus($handle,'代理连通','完成',$null)
+        $offline = [KeyDockWindowProbe]::CheckStatus($handle,'代理连通','失败',$null)
+        ($done -or $offline) -and $canEnable -ne [IntPtr]::Zero -and $off -ne [IntPtr]::Zero
+    } 55
+    Trace-Smoke ("Public 204 probe through local SS peer succeeded: " + [KeyDockWindowProbe]::CheckStatus($handle,'代理连通','完成',$null))
     $managed = [IO.File]::ReadAllBytes($config)
     if ($encoding.GetString($managed).Contains($profile.Key)) { throw 'The Codex profile contains a plaintext key.' }
     $shot = Join-Path (Resolve-Path dist/installer).Path 'KeyDockConnect-window.png'
     $connectedShot = Join-Path $shots '03-connected.png'
-    [KeyDockWindowProbe]::Capture($handle,$connectedShot,'Windows smoke test · synthetic-model')
+    [KeyDockWindowProbe]::Capture($handle,$connectedShot,'设备接入')
     Copy-Item $connectedShot $shot -Force
+    [KeyDockWindowProbe]::Click([KeyDockWindowProbe]::Child($handle,'button','启用系统代理'))
+    $turnOff = Wait-For 'enabled Windows proxy and matching UI state' {
+        $button = [KeyDockWindowProbe]::Child($handle,'button','关闭系统代理')
+        if ($button -ne [IntPtr]::Zero -and [KeyDockWindowProbe]::Child($handle,'label','系统代理已启用') -ne [IntPtr]::Zero) { $button }
+    }
+    $inet = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+    if ($inet.ProxyEnable -ne 1 -or $inet.ProxyServer -notmatch '^127\.0\.0\.1:[0-9]+$') { throw 'UI proxy status does not match Windows Internet Settings.' }
+    $throughSS = & "$env:SystemRoot\System32\curl.exe" -fsS --max-time 8 --noproxy unused.invalid --proxy "http://$($inet.ProxyServer)" "$origin/check-proxy"
+    if ($LASTEXITCODE -ne 0 -or $throughSS -ne 'KeyDock fixture reached') { throw 'The enabled system proxy did not relay the local TLS fixture over SS2022.' }
+    [KeyDockWindowProbe]::Capture($handle,(Join-Path $shots '05-proxy-enabled.png'),'设备接入')
+    [KeyDockWindowProbe]::Click($turnOff)
+    $null = Wait-For 'disabled system proxy' {
+        [KeyDockWindowProbe]::Child($handle,'button','启用系统代理') -ne [IntPtr]::Zero -and
+        [KeyDockWindowProbe]::Child($handle,'label','系统代理未启用') -ne [IntPtr]::Zero
+    }
     Trace-Smoke 'Checking installed DPAPI credential helper'
     $info = New-Object Diagnostics.ProcessStartInfo
     $info.FileName = $exe
@@ -213,6 +275,10 @@ try {
     throw
 } finally {
     if ($null -ne $process -and -not $process.HasExited) { $process.Kill(); $null = $process.WaitForExit(5000) }
+    if (Test-Path (Join-Path $state 'system-proxy.dpapi')) {
+        $null = Invoke-SmokeProcess 'restore fixture Windows proxy' $exe @('--prepare-uninstall') 30
+    }
+    if ($null -ne $peer -and -not $peer.HasExited) { $peer.Kill(); $null = $peer.WaitForExit(5000) }
     if ($null -ne $exitHandle) { $exitHandle.Dispose() }
     if ($nativeStderr -and (Test-Path -LiteralPath $nativeStderr)) {
         $crash = [IO.File]::ReadAllText($nativeStderr)

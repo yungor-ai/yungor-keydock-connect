@@ -2,6 +2,8 @@
 
 Windows x64 原生桌面客户端。员工填写 KeyDock 服务地址和分配给本机的设备接入密钥，助手会领取个人模型配置和 SS 订阅，更新 Codex，并在窗口中显示测试结果。
 
+在 KeyDock 服务地址后加上 `/software`，打开「软件下载」，选择 **KeyDock Connect**。也可以从[公开发布页下载 Windows x64 安装包和 SHA-256 校验文件](https://github.com/yungor-ai/yungor-keydock-connect/releases/latest)。已运行旧版时，先从右下角托盘退出助手，再运行新版安装包。
+
 ## 首次接入
 
 1. 管理员在 KeyDock 的「设备」详情中签发 **Device Key**，将 HTTPS 服务地址和设备密钥交给员工。服务端需要支持 `POST /api/connect/v1/device`。早期的 KeyDock v1.9.0 缺少此接口。
@@ -30,4 +32,4 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-H=windowsg
 python3 scripts/package-core.py dist/app
 ```
 
-在已安装 Inno Setup 的 Windows 电脑上，从仓库根目录运行 `./packaging/build-installer.ps1`。CI 在 Windows runner 上执行系统代理和安装验收，安装程序和 SHA-256 随对应工作流运行提供。代理内核、离线分流数据和第三方许可包含在安装包中。
+在已安装 Inno Setup 的 Windows 电脑上，从仓库根目录运行 `./packaging/build-installer.ps1`。CI 在 Windows runner 上执行系统代理和安装验收。正式安装包和 SHA-256 校验文件随 GitHub Release 发布。代理内核、离线分流数据和第三方许可包含在安装包中。

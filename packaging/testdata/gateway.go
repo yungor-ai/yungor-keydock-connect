@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 )
 
@@ -25,10 +26,15 @@ func check(err error) {
 }
 
 func main() {
-	if len(os.Args) != 2 {
-		panic("expected fixture output directory")
+	if len(os.Args) != 3 {
+		panic("expected fixture directory and loopback SS server port")
 	}
 	dir := os.Args[1]
+	ssPort, err := strconv.Atoi(os.Args[2])
+	check(err)
+	if ssPort < 1 || ssPort > 65535 {
+		panic("invalid fixture SS port")
+	}
 	rootKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	check(err)
 	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -51,7 +57,18 @@ func main() {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"schema_version": 1, "device_name": "Windows smoke test", "model": "synthetic-model", "api_base_url": origin + "/v1", "api_key": "synthetic-ci-helper-key", "subscription_url": ""})
+		var subscription string
+		if _, err := os.Stat(filepath.Join(dir, "subscription-enabled")); err == nil {
+			subscription = origin + "/subscription"
+		}
+		json.NewEncoder(w).Encode(map[string]any{"schema_version": 1, "device_name": "演示工作站", "model": "synthetic-model", "api_base_url": origin + "/v1", "api_key": "synthetic-ci-helper-key", "subscription_url": subscription})
+	})
+	mux.HandleFunc("GET /subscription", func(w http.ResponseWriter, r *http.Request) {
+		// Both fixture keys are synthetic. This server is bound to loopback.
+		fmt.Fprintf(w, "proxies:\n  - {name: test-node, type: ss, server: 127.0.0.1, port: %d, cipher: 2022-blake3-aes-128-gcm, password: \"AAAAAAAAAAAAAAAAAAAAAA==:AQEBAQEBAQEBAQEBAQEBAQ==\"}\nrules: [\"MATCH,test-node\"]\n", ssPort)
+	})
+	mux.HandleFunc("GET /check-proxy", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "KeyDock fixture reached")
 	})
 	mux.HandleFunc("POST /v1/responses", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer synthetic-ci-helper-key" {

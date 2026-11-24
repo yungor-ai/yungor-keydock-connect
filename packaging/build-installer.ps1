@@ -39,7 +39,9 @@ if (Test-Path $included) {
     }
 }
 
-& $compiler 'packaging/keydock-connect.iss'
+$version = (Get-Content -Raw -LiteralPath 'VERSION').Trim()
+if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid installer version in VERSION." }
+& $compiler "/DAppVersion=$version" 'packaging/keydock-connect.iss'
 if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE." }
 $installer = Get-Item 'dist/installer/KeyDockConnect-Setup-windows-x64.exe'
 $digest = (Get-FileHash $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()

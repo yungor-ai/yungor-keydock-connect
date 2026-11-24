@@ -4,30 +4,31 @@ package main
 
 import (
 	"context"
+	"strings"
+
 	"github.com/tailscale/walk"
-	d "github.com/tailscale/walk/declarative"
 	"github.com/tailscale/win"
 	"github.com/yungor-ai/yungor-keydock-connect/internal/desktop"
 	"golang.org/x/sys/windows"
-	"strings"
 )
 
 // This stable GUID also lets Windows retain the user's notification-area preferences.
 var trayGUID = windows.GUID{Data1: 0xad3e9258, Data2: 0x1960, Data3: 0x428e, Data4: [8]byte{0xa5, 0x9f, 0x40, 0x7e, 0x2d, 0x94, 0x69, 0xe3}}
 
 type nativeWindow struct {
-	app                             *walk.Application
-	controller                      *desktop.Controller
-	window                          *walk.MainWindow
-	server, key                     *walk.LineEdit
-	device, message                 *walk.Label
-	checks                          *walk.TextEdit
-	connect, proxy, launch, restore *walk.PushButton
-	state                           desktop.State
-	cleaned                         bool
-	results                         map[string]desktop.Check
-	cancel                          context.CancelFunc
-	quitting                        bool
+	app                                    *walk.Application
+	controller                             *desktop.Controller
+	window                                 *walk.MainWindow
+	server, key                            *walk.LineEdit
+	device, message, proxyState, proxyHint *walk.Label
+	rows                                   []checkRow
+	colors                                 windowColors
+	connect, proxy, launch, restore        *walk.PushButton
+	state                                  desktop.State
+	cleaned                                bool
+	results                                map[string]desktop.Check
+	cancel                                 context.CancelFunc
+	quitting                               bool
 }
 
 func runWindow(dir string, controller *desktop.Controller) error {
@@ -35,7 +36,7 @@ func runWindow(dir string, controller *desktop.Controller) error {
 	if err != nil {
 		return err
 	}
-	ui := &nativeWindow{app: app, controller: controller, results: map[string]desktop.Check{}}
+	ui := &nativeWindow{app: app, controller: controller, results: map[string]desktop.Check{}, colors: nativeColors()}
 	icon, err := walk.NewIconFromResourceId(2)
 	if err != nil {
 		return err
@@ -95,9 +96,6 @@ func runWindow(dir string, controller *desktop.Controller) error {
 	ui.refresh()
 	ui.server.SetText(ui.state.ServerURL)
 	ui.renderChecks()
-	if ui.state.Paired {
-		ui.message.SetText("已配对。保留原服务器地址并留空 Device Key 可同步配置。")
-	}
 	ui.window.Show() // Starts the form exactly once, after all handlers are ready.
 	enteredLoop = true
 	app.Run()
@@ -108,49 +106,6 @@ func runWindow(dir string, controller *desktop.Controller) error {
 		return nil
 	}
 	return controller.Close() // Includes session shutdown initiated by Windows.
-}
-
-func (ui *nativeWindow) build(icon *walk.Icon) error {
-	err := (d.MainWindow{AssignTo: &ui.window, Title: "KeyDock Connect", Visible: false, Icon: icon, Size: d.Size{Width: 590, Height: 490}, MinSize: d.Size{Width: 490, Height: 435}, Layout: d.VBox{Margins: d.Margins{Left: 18, Top: 28, Right: 18, Bottom: 14}, Spacing: 10}, Children: []d.Widget{
-		// Use a fixed-height single-line row. VBox sizes wrapping TextLabel
-		// children by HeightForWidth, ignoring their declared minimum height.
-		d.Label{AssignTo: &ui.device, Text: "设备接入", EllipsisMode: d.EllipsisEnd,
-			MinSize: d.Size{Height: 30}, MaxSize: d.Size{Height: 30}, Font: d.Font{Family: "MS Shell Dlg 2", PointSize: 11}},
-		d.Composite{Layout: d.Grid{Columns: 2, MarginsZero: true, Spacing: 8}, Children: []d.Widget{
-			d.Label{Text: "服务器地址"}, d.LineEdit{AssignTo: &ui.server, Accessibility: d.Accessibility{Name: "服务器地址"}, CueBanner: "https://keydock.example.com"},
-			d.Label{Text: "Device Key"}, d.LineEdit{AssignTo: &ui.key, Accessibility: d.Accessibility{Name: "Device Key"}, PasswordMode: true, CueBanner: "请输入管理员签发的 Device Key"},
-		}},
-		d.Composite{Layout: d.HBox{MarginsZero: true, Spacing: 8}, Children: []d.Widget{
-			d.PushButton{AssignTo: &ui.connect, Text: "连接并测试", OnClicked: ui.startConnect},
-			d.PushButton{AssignTo: &ui.proxy, Text: "启用系统代理", OnClicked: func() {
-				on := !ui.state.Proxy
-				ui.runAction("正在设置系统代理…", func(context.Context) error { return ui.controller.SetProxy(on) })
-			}},
-			d.PushButton{AssignTo: &ui.launch, Text: "打开 Codex", OnClicked: func() {
-				ui.runAction("正在打开 Codex…", func(context.Context) error { return ui.controller.OpenCodex() })
-			}},
-			d.HSpacer{},
-		}},
-		d.GroupBox{Title: "连接检查", Layout: d.VBox{}, Children: []d.Widget{
-			d.TextEdit{AssignTo: &ui.checks, Accessibility: d.Accessibility{Name: "连接检查结果"}, ReadOnly: true, VScroll: true, MinSize: d.Size{Height: 100}},
-		}},
-		d.Label{AssignTo: &ui.message, Text: "请输入服务器地址与 Device Key。"},
-		d.Composite{Layout: d.HBox{MarginsZero: true, Spacing: 8}, Children: []d.Widget{
-			d.PushButton{AssignTo: &ui.restore, Text: "恢复原 Codex 配置", OnClicked: func() {
-				ui.runAction("正在恢复 Codex 配置…", func(context.Context) error { return ui.controller.Restore() })
-			}},
-			d.HSpacer{}, d.PushButton{Text: "退出接入助手", OnClicked: ui.quit},
-		}},
-	}}).Create()
-	if err != nil {
-		return err
-	}
-	// Walk creates a native toolbar even with no actions. Detach and dispose
-	// of it so no invisible child can participate in printing or cover the header.
-	toolbar := ui.window.ToolBar()
-	ui.window.SetToolBar(nil)
-	toolbar.Dispose()
-	return nil
 }
 
 func (ui *nativeWindow) show() {
@@ -168,15 +123,31 @@ func (ui *nativeWindow) show() {
 
 func (ui *nativeWindow) refresh() {
 	ui.state = ui.controller.State()
+	if ui.state.Paired {
+		ui.key.SetCueBanner("使用原服务器时可留空")
+	}
 	if ui.state.Device != "" {
 		ui.device.SetText(ui.state.Device + " · " + ui.state.Model)
 	} else {
-		ui.device.SetText("设备接入")
+		ui.device.SetText("输入管理员提供的服务器地址和设备密钥。")
 	}
 	if ui.state.Proxy {
 		ui.proxy.SetText("关闭系统代理")
+		ui.proxyState.SetText("系统代理已启用")
+		ui.proxyState.SetTextColor(ui.colors.success)
+		ui.proxyHint.SetText("使用系统代理的应用流量正按订阅规则分流。")
 	} else {
 		ui.proxy.SetText("启用系统代理")
+		ui.proxyState.SetText("系统代理未启用")
+		ui.proxyState.SetTextColor(ui.colors.ink)
+		switch {
+		case ui.state.Subscription:
+			ui.proxyHint.SetText("启用后，使用系统代理的应用流量将按订阅规则分流。")
+		case ui.state.Paired:
+			ui.proxyHint.SetText("当前设备未分配 SS 订阅。")
+		default:
+			ui.proxyHint.SetText("连接设备并获取 SS 订阅后，可在此启用。")
+		}
 	}
 	ui.enable()
 }
@@ -191,41 +162,26 @@ func (ui *nativeWindow) enable() {
 	ui.proxy.SetEnabled(idle && (ui.state.Subscription || ui.state.Proxy))
 }
 
-var stages = []struct{ id, label string }{{"device", "设备授权"}, {"codex", "Codex 配置"}, {"model", "模型连通"}, {"proxy", "代理连通"}}
-
-func (ui *nativeWindow) renderChecks() {
-	var lines []string
-	labels := map[string]string{"running": "进行中", "ok": "完成", "failed": "失败", "skipped": "跳过"}
-	for _, s := range stages {
-		if result, ok := ui.results[s.id]; ok {
-			lines = append(lines, s.label+" · "+labels[result.Status]+"    "+result.Message)
-		} else {
-			lines = append(lines, s.label+" · 待检查")
-		}
-	}
-	ui.checks.SetText(strings.Join(lines, "\r\n"))
-}
-
 func (ui *nativeWindow) startConnect() {
 	server, key := strings.TrimSpace(ui.server.Text()), ui.key.Text()
 	ui.key.SetText("")
 	ui.results = map[string]desktop.Check{}
 	ui.renderChecks()
-	ui.runAction("正在检查连接…", func(ctx context.Context) error {
+	ui.runAction("正在检查连接…", "连接检查已完成", func(ctx context.Context) error {
 		return ui.controller.Connect(ctx, server, key, func(result desktop.Check) {
 			ui.app.Synchronize(func() { ui.results[result.Stage] = result; ui.renderChecks() })
 		})
 	})
 }
 
-func (ui *nativeWindow) runAction(progress string, action func(context.Context) error) {
+func (ui *nativeWindow) runAction(progress, done string, action func(context.Context) error) {
 	if ui.cancel != nil || ui.quitting {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	ui.cancel = cancel
 	ui.enable()
-	ui.message.SetText(progress)
+	ui.setMessage(progress, ui.colors.accent)
 	go func() {
 		err := action(ctx)
 		cancel()
@@ -237,12 +193,18 @@ func (ui *nativeWindow) runAction(progress string, action func(context.Context) 
 			}
 			ui.refresh()
 			if err != nil {
-				ui.message.SetText(err.Error())
+				ui.setMessage(err.Error(), ui.colors.danger)
 			} else {
-				ui.message.SetText("操作已完成。")
+				ui.setMessage(done, ui.colors.success)
 			}
 		})
 	}()
+}
+
+func (ui *nativeWindow) setMessage(text string, color walk.Color) {
+	ui.message.SetTextColor(color)
+	ui.message.SetText(strings.ReplaceAll(text, "\n", "　"))
+	ui.message.SetToolTipText(text)
 }
 
 func (ui *nativeWindow) quit() {
@@ -252,7 +214,7 @@ func (ui *nativeWindow) quit() {
 	ui.quitting = true
 	ui.key.SetText("")
 	ui.enable()
-	ui.message.SetText("正在结束操作并恢复系统代理…")
+	ui.setMessage("正在结束操作并恢复系统代理…", ui.colors.accent)
 	if ui.cancel != nil {
 		ui.cancel()
 		return
@@ -268,7 +230,7 @@ func (ui *nativeWindow) finishQuit() {
 				ui.quitting = false
 				ui.refresh()
 				ui.show()
-				ui.message.SetText("退出前无法恢复系统代理：" + err.Error())
+				ui.setMessage("退出前无法恢复系统代理："+err.Error(), ui.colors.danger)
 				return
 			}
 			ui.cleaned = true

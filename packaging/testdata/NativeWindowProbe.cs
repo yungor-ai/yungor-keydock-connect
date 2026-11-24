@@ -112,9 +112,24 @@ public static class KeyDockWindowProbe {
             bool hits=kind=="button" ? cls=="button" && Text(h)==caption && IsWindowEnabled(h)
                 : kind=="server" ? editable && (style & 36)==0
                 : kind=="key" ? editable && (style & 32)!=0
-                : kind=="checks" && editable && (style & 4)!=0;
+                : kind=="label" && cls=="static" && IsWindowVisible(h) && Text(h)==caption;
             if(!hits)return true;
             found=h;return false;},IntPtr.Zero);
+        return found;
+    }
+    // Walk wraps each native STATIC in its own widget. The surrounding row
+    // groups the stage name, current state, and diagnostic message.
+    public static bool CheckStatus(IntPtr window,string stage,string state,string detail=null){
+        var name=Child(window,"label",stage);
+        if(name==IntPtr.Zero)return false;
+        var row=GetParent(GetParent(name));
+        if(row==IntPtr.Zero || Child(row,"label",state)==IntPtr.Zero)return false;
+        if(detail==null)return true;
+        bool found=false;
+        EnumChildWindows(row,(h,a)=>{
+            found=Class(h).Equals("static",StringComparison.OrdinalIgnoreCase) && IsWindowVisible(h) && Text(h).Contains(detail);
+            return !found;
+        },IntPtr.Zero);
         return found;
     }
     public static void Enter(IntPtr h,string v){IntPtr result;if(h==IntPtr.Zero||WriteText(h,12,IntPtr.Zero,v,TimedFlags,2500,out result)==IntPtr.Zero||result==IntPtr.Zero)throw new Exception("Native edit control did not accept input");}
