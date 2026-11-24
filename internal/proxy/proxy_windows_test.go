@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -92,5 +94,95 @@ func TestWindowsProxyCoreLifecycle(t *testing.T) {
 	}
 	if current, _ := currentSettings(); current != original {
 		t.Fatal("crash cleanup did not restore settings")
+	}
+}
+
+func TestWindowsProbeUsesSubscriptionWithoutChangingWindowsSettings(t *testing.T) {
+	if os.Getenv("KEYDOCK_WINDOWS_PROXY_E2E") != "1" {
+		t.Skip("requires a disposable Windows runner")
+	}
+	core := os.Getenv("KEYDOCK_TEST_CORE")
+	port, stop := fixturePeer(t, core)
+	var allow atomic.Bool
+	allow.Store(true)
+	var downloads, checks atomic.Int32
+	// The delivered subscription sends all normal traffic direct. Only a test
+	// that rebuilds its own SS-only route can detect the stopped peer below.
+	body := strings.ReplaceAll(peerSubscription(port), "MATCH,test-node", "MATCH,DIRECT")
+	endpoint := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			t.Error("unexpected bearer on network diagnostic")
+		}
+		switch r.URL.Path {
+		case "/sub":
+			downloads.Add(1)
+			if !allow.Load() {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			io.WriteString(w, body)
+		case "/check":
+			checks.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer endpoint.Close()
+	cfg := endpoint.Client().Transport.(*http.Transport).TLSClientConfig
+	m := New(t.TempDir(), core)
+	orig, err := currentSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Keep the user's actual proxy running throughout the independent check.
+	m.mu.Lock()
+	err = m.startProfileLocked([]byte(body))
+	m.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := m.Stop(); err != nil {
+			t.Error(err)
+		}
+		if now, _ := currentSettings(); now != orig {
+			t.Error("original settings lost")
+			_ = applySettings(orig)
+		}
+	})
+	prior, err := currentSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := func(ctx context.Context) error {
+		return m.testConnection(ctx, endpoint.URL+"/sub", endpoint.URL+"/check", cfg)
+	}
+	if err := check(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	allow.Store(false)
+	if err := check(context.Background()); err == nil {
+		t.Error("revoked subscription reported healthy")
+	}
+	allow.Store(true)
+	stop()
+	if err := check(context.Background()); err == nil {
+		t.Error("failed SS2022 connection fell back to direct")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := check(ctx); err == nil {
+		t.Error("cancelled probe succeeded")
+	}
+	if downloads.Load() != 3 || checks.Load() != 1 {
+		t.Errorf("downloads %d, probes %d", downloads.Load(), checks.Load())
+	}
+	if now, err := currentSettings(); err != nil || now != prior || !m.Active() {
+		t.Fatal("diagnosis interrupted the user's running proxy")
+	}
+	entries, err := filepath.Glob(filepath.Join(m.stateDir, "proxy-runtime-*"))
+	if err != nil || len(entries) != 1 {
+		t.Fatal("diagnostic process state not cleaned")
 	}
 }

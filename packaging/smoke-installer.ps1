@@ -1,4 +1,4 @@
-# This test installs a per-user program, exercises Windows DPAPI, and uninstalls it.
+﻿# This test installs a per-user program, exercises Windows DPAPI, and uninstalls it.
 # Only run it in a disposable hosted Windows job.
 $ErrorActionPreference = 'Stop'
 if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') {
@@ -15,7 +15,7 @@ if ($setup.ExitCode -ne 0) { throw "Installation failed ($($setup.ExitCode))." }
 # Verify installed bytes, including all notices, source archives and routing data.
 $stage = (Resolve-Path dist/app).Path
 foreach ($file in (Get-ChildItem $stage -Recurse -File)) {
-    $relative = [IO.Path]::GetRelativePath($stage, $file.FullName)
+    $relative = $file.FullName.Substring($stage.Length + 1)
     $installed = Join-Path $installDir $relative
     if ((Get-FileHash $installed).Hash -ne (Get-FileHash $file.FullName).Hash) {
         throw "Installed file differs from the verified payload: $relative"
@@ -34,42 +34,77 @@ $original = "# synthetic preexisting Codex settings`nmodel = `"previous-model`"`
 [IO.File]::WriteAllText($config, $original)
 $originalHash = (Get-FileHash $config).Hash
 
-# Seed an already imported, synthetic profile using Windows current-user DPAPI.
-# The bundle parser itself is exercised separately by the Go test suites.
-$profile = @{
-    DeviceName = 'Windows smoke test'; BaseURL = 'https://model.example.invalid/v1'
-    Key = 'synthetic-ci-helper-key'; Model = 'synthetic-model'; SubscriptionURL = ''
-}
+# Use only a throwaway current-user test CA and a loopback HTTPS fixture.
+# No employee account, subscription, proxy, or external model is contacted.
+$fixtureExe = Join-Path $testRoot 'fixture.exe'
+go build -o $fixtureExe ./packaging/testdata/gateway.go
+if ($LASTEXITCODE -ne 0) { throw 'Failed to build local TLS fixture.' }
+$fixture = Start-Process $fixtureExe -ArgumentList ('"' + $testRoot + '"') -PassThru
+$authority = $null
+$process = $null
 $encoding = [Text.Encoding]::UTF8
-$protection = [Security.Cryptography.DataProtectionScope]::CurrentUser
-$plain = $encoding.GetBytes(($profile | ConvertTo-Json -Compress))
-[IO.File]::WriteAllBytes((Join-Path $state 'device.bin'), [Security.Cryptography.ProtectedData]::Protect($plain, $null, $protection))
-
-$process = Start-Process $exe -PassThru
-try {
-    $savedWindow = Join-Path $state 'window.bin'
-    for ($i = 0; $i -lt 120 -and -not (Test-Path $savedWindow); $i++) {
-        if ($process.HasExited) { throw 'Installed application exited before opening the desktop.' }
-        Start-Sleep -Milliseconds 250
+function Wait-For($description, [scriptblock]$condition) {
+    for ($i=0; $i -lt 160; $i++) {
+        $value = & $condition
+        if ($value) { return $value }
+        Start-Sleep -Milliseconds 125
     }
-    $window = [Uri]$encoding.GetString([Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes($savedWindow), $null, $protection))
-    $origin = $window.GetLeftPart([UriPartial]::Authority)
-    $headers = @{ Origin = $origin; 'X-KeyDock-Session' = $window.Fragment.Substring(1) }
-    $page = Invoke-WebRequest "$origin/" -NoProxy
-    if ($page.StatusCode -ne 200 -or $page.Content -notmatch 'KeyDock Connect') { throw 'Desktop page did not load.' }
-    $result = Invoke-RestMethod "$origin/api/apply" -NoProxy -Method Post -Headers $headers -ContentType 'application/json' -Body '{"model":"synthetic-model"}'
-    if (-not $result.configured) { throw 'Installed application could not apply the Codex profile.' }
+    throw "Timed out waiting for $description"
+}
+try {
+    $null = Wait-For 'test gateway' { Test-Path (Join-Path $testRoot 'fixture-origin') }
+    $origin = Get-Content -Raw (Join-Path $testRoot 'fixture-origin')
+    $authority = Import-Certificate -FilePath (Join-Path $testRoot 'test-ca.cer') -CertStoreLocation 'Cert:\CurrentUser\Root'
+    $profile = @{ BaseURL = "$origin/v1"; Key = 'synthetic-ci-helper-key' }
+    # Compile against Windows PowerShell's .NET Framework for System.Drawing.
+    # Run this smoke in ordinary powershell.exe (set by the workflow).
+    Add-Type -Path 'packaging/testdata/NativeWindowProbe.cs' -ReferencedAssemblies @('System.dll','System.Drawing.dll')
+    $process = Start-Process $exe -PassThru
+    $handle = Wait-For 'native Win32 setup window' {
+        if ($process.HasExited) { throw 'Application exited before showing its window.' }
+        $h = [KeyDockWindowProbe]::Window($process.Id,$null,'KeyDock Connect')
+        if ($h -ne [IntPtr]::Zero -and [KeyDockWindowProbe]::IsWindowVisible($h)) { $h }
+    }
+    $serverField = [KeyDockWindowProbe]::Child($handle,'server','')
+    $keyField = [KeyDockWindowProbe]::Child($handle,'key','')
+    [KeyDockWindowProbe]::Enter($serverField,$origin)
+    [KeyDockWindowProbe]::Enter($keyField,'fixture-device-key')
+    [KeyDockWindowProbe]::Click([KeyDockWindowProbe]::Child($handle,'button','连接并测试'))
+    $null = Wait-For 'four native connection checks' {
+        $checks = [KeyDockWindowProbe]::Text([KeyDockWindowProbe]::Child($handle,'checks',''))
+        $checks -match '设备授权 · 完成' -and $checks -match 'Codex 配置 · 完成' -and
+        $checks -match '模型连通 · 完成' -and $checks -match '代理连通 · 跳过'
+    }
     $managed = [IO.File]::ReadAllBytes($config)
     if ($encoding.GetString($managed).Contains($profile.Key)) { throw 'The Codex profile contains a plaintext key.' }
-
-    # The installed GUI executable also serves as a noninteractive credential helper.
+    $shot = Join-Path (Resolve-Path dist/installer).Path 'KeyDockConnect-window.png'
+    [KeyDockWindowProbe]::Capture($handle,$shot)
     $credential = (& $exe --credential | Out-String).Trim()
-    if ($credential -cne $profile.Key -or $LASTEXITCODE -ne 0) { throw 'Installed credential helper did not return the test credential.' }
+    if ($credential -cne $profile.Key -or $LASTEXITCODE -ne 0) { throw 'Installed credential helper failed.' }
+
     $runningAttempt = Start-Process $uninstaller -ArgumentList $flags -Wait -PassThru
     if ($runningAttempt.ExitCode -eq 0 -or -not (Test-Path $exe)) { throw 'Uninstall must stop while KeyDock Connect is running.' }
-
-    $null = Invoke-RestMethod "$origin/api/quit" -NoProxy -Method Post -Headers $headers
-    if (-not $process.WaitForExit(15000)) { throw 'The installed application did not exit.' }
+    [KeyDockWindowProbe]::HideViaClose($handle)
+    $null = Wait-For 'hidden native window' { -not [KeyDockWindowProbe]::IsWindowVisible($handle) }
+    $second = Start-Process $exe -PassThru -Wait
+    if ($second.ExitCode -ne 0) { throw 'Second launch failed to signal the primary window.' }
+    $null = Wait-For 'same primary HWND reopened by second launch' { [KeyDockWindowProbe]::IsWindowVisible($handle) }
+    [KeyDockWindowProbe]::HideViaClose($handle)
+    $null = Wait-For 'hidden native window before tray activation' { -not [KeyDockWindowProbe]::IsWindowVisible($handle) }
+    $sink = [KeyDockWindowProbe]::Window($process.Id,'WalkNotifyIconSink',$null)
+    # Exercise the pinned Walk version's real Shell_NotifyIcon callback and its menu.
+    [KeyDockWindowProbe]::SelectTray($sink)
+    $null = Wait-For 'visible native window after notification-area selection' { [KeyDockWindowProbe]::IsWindowVisible($handle) }
+    [KeyDockWindowProbe]::OpenTrayMenu($sink)
+    $popup = Wait-For 'tray context menu' {
+        $h = [KeyDockWindowProbe]::Window($process.Id,'#32768',$null)
+        if ($h -ne [IntPtr]::Zero -and [KeyDockWindowProbe]::IsWindowVisible($h)) { $h }
+    }
+    if ([KeyDockWindowProbe]::MenuLabel($popup,0) -ne '打开 KeyDock Connect' -or [KeyDockWindowProbe]::MenuLabel($popup,1) -ne '退出接入助手') {
+        throw 'The notification-area menu is missing its open or exit action.'
+    }
+    [KeyDockWindowProbe]::ExitViaMenu($popup)
+    if (-not $process.WaitForExit(15000)) { throw 'The installed application did not exit through its notification-area menu.' }
 
     # Simulate a user edit outside the app. The uninstaller must retain the
     # credential executable and configuration until this conflict is resolved.
@@ -86,7 +121,9 @@ try {
     if ($uninstall.ExitCode -ne 0 -or (Test-Path $exe) -or (Get-FileHash $config).Hash -ne $originalHash) {
         throw 'Uninstall did not remove the program and restore the original Codex configuration.'
     }
-    Write-Host 'Verified per-user installation, desktop startup, DPAPI credential helper, guarded uninstall and exact restoration.'
+    Write-Host 'Verified native Windows setup, authenticated HTTPS device enrollment, model probe, credential helper, close-to-tray, reopening, tray actions and guarded uninstall.'
 } finally {
-    if (-not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
+    if ($null -ne $process -and -not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
+    if (-not $fixture.HasExited) { $fixture.Kill(); $fixture.WaitForExit() }
+    if ($null -ne $authority) { Remove-Item ('Cert:\CurrentUser\Root\' + $authority.Thumbprint) }
 }

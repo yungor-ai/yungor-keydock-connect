@@ -125,3 +125,18 @@ func TestRealCoreAcceptsFilteredKeyDockConfig(t *testing.T) {
 		t.Fatalf("synthetic config rejected: %v %s", err, output)
 	}
 }
+
+func TestDiagnosticProfileForcesOnlyDeviceNode(t *testing.T) {
+	source := strings.ReplaceAll(fixture, "MATCH,Proxy", "MATCH,DIRECT")
+	encoded, err := buildRouting([]byte(source), 12345, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg routing
+	if yaml.Unmarshal(encoded, &cfg) != nil || len(cfg.Proxies) != 1 || len(cfg.Groups) != 0 || len(cfg.Rules) != 1 || cfg.Rules[0] != "MATCH,test-node" {
+		t.Fatal("diagnosis can bypass the device node or trigger an unrelated test URL")
+	}
+	if _, err = buildRouting([]byte(strings.ReplaceAll(source, "DOMAIN,blocked.example,REJECT", "RULE-SET,example,REJECT")), 12345, true); err == nil {
+		t.Fatal("invalid subscription accepted as healthy")
+	}
+}

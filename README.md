@@ -1,26 +1,26 @@
 # KeyDock Connect · KeyDock 接入助手
 
-Windows x64 员工客户端。从 KeyDock 的加密个人接入包配置官方 Codex，按需为当前 Windows 用户开启系统代理。
+Windows x64 原生桌面客户端。员工填写 KeyDock 服务地址和分配给本机的设备接入密钥，助手会领取个人模型配置和 SS 订阅，更新 Codex，并在窗口中显示测试结果。
 
-## 员工使用
+## 首次接入
 
-1. 运行 Windows 安装程序，再从开始菜单打开 **KeyDock 接入助手**。程序优先使用 Edge 的独立窗口，也支持默认浏览器。窗口连接到本机回环地址。
-2. 选择管理员发放的加密个人 ZIP 或包含它的软件 ZIP，输入单独发放的口令。程序兼容旧版单 Key 包和新版多 Key 包；新版按清单选取这台设备的默认 Key。
-3. 核对默认模型。接入包没指定模型时，点击 **读取模型** 选择网关返回的型号，也可以输入管理员提供的模型名。
-4. 点击 **配置并打开 Codex**。首次安装 Codex 可通过窗口内的官方安装指南获取。Codex 已经在运行时，请完全退出后重开。使用原生 Windows CLI 的员工可以选择 **仅应用配置**，再到终端运行 `codex`。WSL 使用自己的配置目录。
-5. 需要浏览器等应用经过公司代理时，点击 **启用系统代理**。关闭代理或使用 **退出接入助手** 会回收本程序的设置。直接关窗口时后台进程继续运行，可从开始菜单重新打开。
+1. 管理员在 KeyDock 的「设备」详情中签发 **Device Key**，将 HTTPS 服务地址和设备密钥交给员工。服务端需要支持 `POST /api/connect/v1/device`。早期的 KeyDock v1.9.0 缺少此接口。
+2. 安装并打开 **KeyDock 接入助手**。填写上述两项，点击 **连接并测试**。服务器地址示例为 `https://keydock.example.com`。助手会自动获取分配给设备的模型名称、模型 Key 和可用的代理订阅。
+3. 查看窗口里的分项结果。助手会核对 Codex 实际使用的本地配置，向配置的模型发出一条简短请求，并通过临时代理核心验证 SS 节点。模型测试可能产生少量用量。仅开通模型的设备会显示跳过 SS 检测。
+4. 需要使用 Codex 时，打开官方 Windows 桌面版或在新终端运行 `codex`。已有 Codex 进程请完全退出再打开。客户端需支持 Responses API 与命令凭据助手。需要浏览器等应用经过公司代理时，再开启 **系统代理**。
 
-**恢复原 Codex 配置** 会撤销受管的提供商和模型设置。应用保存当前用户的加密备份，保留已有提供商和 `auth.json`。卸载前请先在窗口内退出助手，卸载程序会调用同一个恢复流程。启用系统代理仅影响采用 Windows 用户代理设置的应用。客户端采用订阅下发的 SS2022 规则分流，默认关闭 TUN 和局域网共享，断电等异常终止后在下次启动时处理遗留代理设置。
+后续可直接使用同一台电脑保存的设备授权重新同步。管理员轮换设备接入密钥或更换服务器地址后，请填写对应的新密钥。个人模型 Key 轮换后，再同步即可更新 Codex。[Codex 安装指南](https://developers.openai.com/codex/quickstart/) · [KeyDock 服务端设备接入说明](https://github.com/yungor-ai/yungor-keydock/blob/main/docs/device-connect.md)
 
-## 与 KeyDock 的连接
+## 托盘与恢复
 
-模型请求由 Codex 发往设备包中的 HTTPS 网关。凭据助手从 Windows DPAPI 保护的用户状态中取得个人 Key。设备包口令只用于当次导入。订阅按需从个人 HTTPS 地址直接刷新，代理内核、离线分流数据和第三方许可包含在安装包中。无需另装 CC Switch、Clash Verge Rev 或解压工具。
+- 关闭窗口后，助手在 Windows 通知区域继续运行。通过右下角托盘图标重新打开窗口，或选择退出。Windows 可能将图标收在「显示隐藏的图标」中。
+- 退出助手会恢复它接管的 Windows 用户代理设置。系统或助手被强制终止时，下次启动会尝试恢复。系统代理按订阅规则分流，关闭 TUN 和局域网共享。
+- **恢复原 Codex 配置** 会撤销助手管理的提供商和模型设置。助手保留其他提供商、现有登录凭据以及后续添加的项目设置。卸载前请从托盘退出，卸载程序会调用恢复流程。
+- 设备密钥和服务端返回的个人资料由 Windows 当前用户的 DPAPI 加密保存。升级自 v0.1 时保留已经应用的 Codex 配置及其恢复记录；首次在线同步需要输入服务地址和设备密钥。
 
-管理员可沿用 KeyDock 已有的加密交付包。员工只收到 API 信息或 Excel 时，需要管理员另外提供该设备的加密包。Codex 客户端需支持 Responses API 和自定义提供商的命令凭据助手。模型网关按 KeyDock 管理员授权计费；读取模型只请求模型列表，真实对话在官方 Codex 中发起。[Codex 网关指南](https://learn.chatgpt.com/docs/enterprise/connect-to-a-gateway)
+## 构建
 
-## 开发与构建
-
-使用 go.mod 指定的 Go 工具链。测试使用临时目录和合成设备资料。
+使用 go.mod 指定的 Go 工具链。原生窗口使用 Walk 和 Win32 系统控件。设备连接、模型测试、代理测试都有独立的合成数据回归。
 
 ```sh
 go test -race ./...
@@ -30,6 +30,4 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-H=windowsg
 python3 scripts/package-core.py dist/app
 ```
 
-在已安装 Inno Setup 的 Windows 电脑上，从仓库根目录运行 `./packaging/build-installer.ps1` 生成按用户安装的安装包。安装目录中的凭据助手需要保留在固定位置。GitHub Actions 使用 Windows runner 测试并生成安装程序与 SHA-256，产物可在对应工作流运行的 Artifacts 中下载。
-
-Go 入口位于 `cmd/keydock-connect`。设备包、Codex 配置、系统代理和本地界面分别位于 `internal/bundle`、`internal/codex`、`internal/proxy`、`internal/desktop`。第三方代理内核与规则数据的版本、下载地址和哈希记录在 `scripts/package-core.py`，随附来源和许可位于安装目录的 `licenses`。
+在已安装 Inno Setup 的 Windows 电脑上，从仓库根目录运行 `./packaging/build-installer.ps1`。CI 在 Windows runner 上执行系统代理和安装验收，安装程序和 SHA-256 随对应工作流运行提供。代理内核、离线分流数据和第三方许可包含在安装包中。

@@ -4,6 +4,7 @@ import "sync"
 
 type Manager struct {
 	mu                 sync.Mutex
+	scratch            sync.RWMutex
 	stateDir, corePath string
 	running            *child
 }

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"golang.org/x/sys/windows"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"unsafe"
 )
@@ -36,31 +35,6 @@ func uninstalling() bool {
 		return true
 	}
 	return !errors.Is(err, windows.ERROR_FILE_NOT_FOUND)
-}
-func browse(raw string) error {
-	// Edge app mode provides a dedicated window without requiring another runtime.
-	for _, root := range []string{os.Getenv("ProgramFiles(x86)"), os.Getenv("ProgramFiles")} {
-		if root == "" {
-			continue
-		}
-		path := filepath.Join(root, "Microsoft", "Edge", "Application", "msedge.exe")
-		if _, err := os.Stat(path); err == nil {
-			args := []string{"--app=" + raw, "--no-first-run"}
-			if local := os.Getenv("LOCALAPPDATA"); local != "" {
-				args = append(args, "--user-data-dir="+filepath.Join(local, "Yungor", "KeyDockConnect", "Window"))
-			}
-			cmd := exec.Command(path, args...)
-			if err := cmd.Start(); err == nil {
-				return cmd.Process.Release()
-			}
-		}
-	}
-
-	cmd := exec.Command("rundll32.exe", "url.dll,FileProtocolHandler", raw)
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	return cmd.Process.Release()
 }
 func displayError(s string) {
 	p, _ := windows.UTF16PtrFromString(s)

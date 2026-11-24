@@ -77,25 +77,11 @@ func TestSS2022DataPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ssPort := reservePort(t)
-	server := fmt.Sprintf(`mode: direct
-log-level: warning
-listeners:
-  - name: fixture-ss
-    type: shadowsocks
-    listen: 127.0.0.1
-    port: %d
-    cipher: 2022-blake3-aes-128-gcm
-    password: "AAAAAAAAAAAAAAAAAAAAAA=="
-    users: {test-device: "AQEBAQEBAQEBAQEBAQEBAQ=="}
-`, ssPort)
-	stopServer := runFixtureCore(t, core, []byte(server), ssPort)
+	ssPort, stopServer := fixturePeer(t, core)
 	clientPort := reservePort(t)
 	// No external groups, GEO downloads, or health probes in this data path.
-	source := strings.SplitN(fixture, "proxy-groups:", 2)[0] + "rules:\n  - MATCH,test-node\n"
-	source = strings.ReplaceAll(source, "192.0.2.1", "127.0.0.1")
-	source = strings.ReplaceAll(source, "24443", strconv.Itoa(ssPort))
-	clientProfile, err := buildProfile([]byte(source), clientPort)
+	source := strings.Replace(peerSubscription(ssPort), "MATCH,test-node", "MATCH,DIRECT", 1)
+	clientProfile, err := buildRouting([]byte(source), clientPort, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,4 +108,28 @@ listeners:
 	if check() {
 		t.Fatal("encrypted route bypassed the stopped SS2022 server")
 	}
+}
+
+func fixturePeer(t *testing.T, core string) (int, func()) {
+	t.Helper()
+	ssPort := reservePort(t)
+	server := fmt.Sprintf(`mode: direct
+log-level: warning
+listeners:
+  - name: fixture-ss
+    type: shadowsocks
+    listen: 127.0.0.1
+    port: %d
+    cipher: 2022-blake3-aes-128-gcm
+    password: "AAAAAAAAAAAAAAAAAAAAAA=="
+    users: {test-device: "AQEBAQEBAQEBAQEBAQEBAQ=="}
+`, ssPort)
+	return ssPort, runFixtureCore(t, core, []byte(server), ssPort)
+
+}
+
+func peerSubscription(port int) string {
+	source := strings.ReplaceAll(fixture, "192.0.2.1", "127.0.0.1")
+	source = strings.ReplaceAll(source, "24443", strconv.Itoa(port))
+	return strings.SplitN(source, "proxy-groups:", 2)[0] + "rules:\n  - MATCH,test-node\n"
 }

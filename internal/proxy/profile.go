@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"bytes"
+	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"io"
@@ -43,17 +45,25 @@ type routing struct {
 	Rules   []string     `yaml:"rules"`
 }
 
-func subscription(raw string) ([]byte, error) {
+func subscription(ctx context.Context, raw string, tlsConfig *tls.Config) ([]byte, error) {
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
 		return nil, errors.New("订阅地址必须为有效的 HTTPS 地址")
 	}
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.Proxy = nil
+	tr.TLSClientConfig = tlsConfig
 	defer tr.CloseIdleConnections()
 	c := http.Client{Transport: tr, Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	resp, err := c.Get(raw)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, raw, nil)
 	if err != nil {
+		return nil, errors.New("订阅地址无效")
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, errors.New("无法连接订阅服务，请检查网络后重试")
 	}
 	defer resp.Body.Close()
@@ -140,7 +150,9 @@ func validRule(rule string, names map[string]bool) bool {
 	}
 	return false
 }
-func buildProfile(body []byte, port int) ([]byte, error) {
+func buildProfile(body []byte, port int) ([]byte, error) { return buildRouting(body, port, false) }
+
+func buildRouting(body []byte, port int, diagnostic bool) ([]byte, error) {
 	bad := errors.New("订阅不是受支持的 KeyDock SS2022 分流配置，请重新下载连接包")
 	if len(body) > profileLimit || port < 1 || port > 65535 {
 		return nil, bad
@@ -186,6 +198,13 @@ func buildProfile(body []byte, port int) ([]byte, error) {
 		if !validRule(rule, names) {
 			return nil, bad
 		}
+	}
+	if diagnostic {
+		// A direct fallback could make a disabled device look healthy. Put only
+		// the first device SS2022 node into this short-lived probe's profile.
+		cfg.Proxies = cfg.Proxies[:1]
+		cfg.Groups = nil
+		cfg.Rules = []string{"MATCH," + cfg.Proxies[0].Name}
 	}
 	return yaml.Marshal(struct {
 		Routing       routing `yaml:",inline"`

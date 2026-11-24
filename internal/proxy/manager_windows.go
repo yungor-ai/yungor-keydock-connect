@@ -2,12 +2,16 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"io"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -121,7 +125,7 @@ func ownsListener(pid, port int) bool {
 	}
 	return false
 }
-func (m *Manager) launch(profile []byte, port int) (*child, error) {
+func (m *Manager) launch(ctx context.Context, profile []byte, port int) (*child, error) {
 	if err := digestCopy(m.corePath, io.Discard, coreDigest); err != nil {
 		return nil, err
 	}
@@ -168,6 +172,9 @@ func (m *Manager) launch(profile []byte, port int) (*child, error) {
 	defer ticker.Stop()
 	for {
 		select {
+		case <-ctx.Done():
+			p.close()
+			return nil, ctx.Err()
 		case <-p.done:
 			p.close()
 			return nil, errors.New("代理核心未能加载订阅分流配置")
@@ -198,25 +205,32 @@ func (m *Manager) Start(raw string) error {
 		return err
 	}
 	m.pruneRuntime()
-	body, err := subscription(raw)
+	body, err := subscription(context.Background(), raw, nil)
 	if err != nil {
 		return err
 	}
 	return m.startProfileLocked(body)
 }
 
-func (m *Manager) startProfileLocked(body []byte) error {
+func loopbackPort() (int, error) {
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
-		return errors.New("无法分配本机代理端口")
+		return 0, errors.New("无法分配本机代理端口")
 	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	listener.Close()
+	defer listener.Close()
+	return listener.Addr().(*net.TCPAddr).Port, nil
+}
+
+func (m *Manager) startProfileLocked(body []byte) error {
+	port, err := loopbackPort()
+	if err != nil {
+		return err
+	}
 	cfg, err := buildProfile(body, port)
 	if err != nil {
 		return err
 	}
-	p, err := m.launch(cfg, port)
+	p, err := m.launch(context.Background(), cfg, port)
 	if err != nil {
 		return err
 	}
@@ -270,6 +284,8 @@ func (m *Manager) Stop() error {
 }
 
 func (m *Manager) pruneRuntime() {
+	m.scratch.Lock()
+	defer m.scratch.Unlock()
 	// This directory is private to KeyDock and the desktop holds a per-user
 	// singleton lock. Remove orphaned data copies after an abnormal termination.
 	entries, _ := os.ReadDir(m.stateDir)
@@ -281,4 +297,58 @@ func (m *Manager) pruneRuntime() {
 			}
 		}
 	}
+}
+
+// Test exercises the device subscription without changing WinINet or the managed
+// desktop proxy. No API credential is sent to the connectivity-check endpoint.
+func (m *Manager) Test(ctx context.Context, subscriptionURL string) error {
+	return m.testConnection(ctx, subscriptionURL, "https://www.gstatic.com/generate_204", nil)
+}
+
+func (m *Manager) testConnection(ctx context.Context, subscriptionURL, target string, tlsConfig *tls.Config) error {
+	ctx, cancel := context.WithTimeout(ctx, 35*time.Second)
+	defer cancel()
+	body, err := subscription(ctx, subscriptionURL, tlsConfig)
+	if err != nil {
+		return err
+	}
+
+	m.scratch.RLock()
+	defer m.scratch.RUnlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	port, err := loopbackPort()
+	if err != nil {
+		return err
+	}
+	data, err := buildRouting(body, port, true)
+	if err != nil {
+		return err
+	}
+	p, err := m.launch(ctx, data, port)
+	if err != nil {
+		return err
+	}
+	defer p.close()
+	local := &url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(port))}
+	tr := &http.Transport{Proxy: http.ProxyURL(local), TLSClientConfig: tlsConfig, DisableKeepAlives: true, TLSHandshakeTimeout: 8 * time.Second}
+	defer tr.CloseIdleConnections()
+	c := http.Client{Transport: tr, Timeout: 12 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return errors.New("代理检查地址无效")
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return errors.New("SS2022 代理未能连接到 HTTPS 测试服务")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		return errors.New("代理测试服务未返回预期的 204 响应")
+	}
+	return nil
 }
