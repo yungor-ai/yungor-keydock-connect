@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>KeyDock Connect · 接入助手</title><link rel="stylesheet" href="/desk.css"><script defer src="/desk.js"></script></head>
+<body><header><div class="bar"><span class="brand-mark" aria-hidden="true">K</span><strong>KeyDock <span>Connect</span></strong><span class="platform">设备接入助手</span></div></header>
+<main><section class="intro"><div><h1>设备接入</h1><p>使用管理员发给你的个人接入包，配置 Codex 和系统代理。</p></div><span id="deviceBadge" class="badge">尚未导入设备</span></section>
+<div class="workspace"><div class="primary">
+<section class="card"><h2>个人接入包</h2><form id="importForm"><label for="pkg">设备包</label><input id="pkg" type="file" accept=".zip,application/zip" required><div class="import-row"><div><label for="password">接入包口令</label><input id="password" type="password" required autocomplete="off" placeholder="输入管理员单独提供的口令"></div><button id="importBtn" class="action" type="submit">导入接入包</button></div></form></section>
+<section class="card"><div class="section-title"><h2>Codex</h2><span class="state" id="codexState">尚未配置</span></div><form id="configForm"><label for="model">默认模型</label><div class="input-row"><input id="model" list="models" placeholder="输入或选择获授权的模型" maxlength="200" required><datalist id="models"></datalist><button type="button" id="loadModels">读取模型</button></div><div class="buttons"><button type="submit" id="applyBtn" class="action">配置并打开 Codex</button><button type="submit" id="applyOnly">仅应用配置</button><button type="button" id="launch">打开 Codex</button><a href="https://developers.openai.com/codex/quickstart/" rel="noopener noreferrer" target="_blank">官方安装指南 ↗</a></div></form></section></div>
+<aside><section class="card"><div class="section-title"><h2>系统代理</h2><span class="state" id="proxyState">已关闭</span></div><p>需要浏览器或其他应用使用设备订阅时开启。</p><button id="toggle" class="wide" type="button">启用系统代理</button></section>
+<section class="card"><h2>设备信息</h2><dl><dt>设备名称</dt><dd id="device">尚未导入</dd><dt>模型网关</dt><dd id="gateway">—</dd></dl></section></aside></div>
+<div id="notice" role="status" aria-live="polite"></div>
+<footer><button id="restore" class="text" type="button">恢复原 Codex 配置</button><span class="separator"></span><button id="quit" class="text" type="button">退出接入助手</button></footer>
+<dialog id="confirm"><h2 id="dialogTitle"></h2><p id="dialogMessage"></p><div class="buttons"><button id="cancel" type="button">取消</button><button id="accept" type="button" class="action">确认</button></div></dialog>
+</main></body></html>

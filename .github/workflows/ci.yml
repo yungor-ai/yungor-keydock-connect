@@ -1,0 +1,60 @@
+name: Test and build Windows installer
+
+on:
+  pull_request:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test -race ./...
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+      - name: Prepare verified proxy core and offline routing data
+        run: python scripts/package-core.py dist/app
+      - name: Test on the disposable Windows desktop
+        env:
+          KEYDOCK_WINDOWS_PROXY_E2E: "1"
+        run: |
+          $env:KEYDOCK_TEST_CORE = (Resolve-Path "dist/app/core/mihomo.exe").Path
+          go test -count=1 -v ./...
+      - name: Build Windows x64 GUI
+        env:
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: go build -trimpath -ldflags="-H=windowsgui -s -w" -o dist/app/KeyDockConnect.exe ./cmd/keydock-connect
+      - name: Build per-user installer
+        shell: pwsh
+        run: ./packaging/build-installer.ps1
+      - name: Verify installed application and safe uninstall
+        shell: pwsh
+        run: ./packaging/smoke-installer.ps1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: KeyDockConnect-windows-x64
+          path: |
+            dist/installer/KeyDockConnect-Setup-windows-x64.exe
+            dist/installer/SHA256SUMS.txt
+          if-no-files-found: error
