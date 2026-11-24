@@ -44,7 +44,15 @@ func runWindow(dir string, controller *desktop.Controller) error {
 	if err := ui.build(icon); err != nil {
 		return err
 	}
-	defer ui.window.Dispose()
+	// The Walk layout worker closes its quit channel when App.Exit cancels
+	// the app context. A form may only be disposed while that worker is alive.
+	enteredLoop := false
+	defer func() {
+		if !enteredLoop && !ui.window.IsDisposed() {
+			ui.window.Dispose()
+		}
+	}()
+	ui.window.SetExitOnClose(false)
 	tray, err := walk.NewNotifyIconWithGUID(trayGUID)
 	if err != nil {
 		return err
@@ -90,7 +98,8 @@ func runWindow(dir string, controller *desktop.Controller) error {
 	if ui.state.Paired {
 		ui.message.SetText("已配对。保留原服务器地址并留空 Device Key 可同步配置。")
 	}
-	ui.show()
+	ui.window.Show() // Starts the form exactly once, after all handlers are ready.
+	enteredLoop = true
 	app.Run()
 	if ui.cancel != nil {
 		ui.cancel()
@@ -102,7 +111,7 @@ func runWindow(dir string, controller *desktop.Controller) error {
 }
 
 func (ui *nativeWindow) build(icon *walk.Icon) error {
-	return (d.MainWindow{AssignTo: &ui.window, Title: "KeyDock Connect", Icon: icon, Size: d.Size{Width: 590, Height: 490}, MinSize: d.Size{Width: 490, Height: 435}, Layout: d.VBox{Margins: d.Margins{Left: 18, Top: 16, Right: 18, Bottom: 14}, Spacing: 10}, Children: []d.Widget{
+	err := (d.MainWindow{AssignTo: &ui.window, Title: "KeyDock Connect", Visible: false, Icon: icon, Size: d.Size{Width: 590, Height: 490}, MinSize: d.Size{Width: 490, Height: 435}, Layout: d.VBox{Margins: d.Margins{Left: 18, Top: 16, Right: 18, Bottom: 14}, Spacing: 10}, Children: []d.Widget{
 		d.Label{AssignTo: &ui.device, Text: "设备接入", Font: d.Font{PointSize: 12, Bold: true}},
 		d.Composite{Layout: d.Grid{Columns: 2, MarginsZero: true, Spacing: 8}, Children: []d.Widget{
 			d.Label{Text: "服务器地址"}, d.LineEdit{AssignTo: &ui.server, Accessibility: d.Accessibility{Name: "服务器地址"}, CueBanner: "https://keydock.example.com"},
@@ -130,13 +139,20 @@ func (ui *nativeWindow) build(icon *walk.Icon) error {
 			d.HSpacer{}, d.PushButton{Text: "退出接入助手", OnClicked: ui.quit},
 		}},
 	}}).Create()
+	if err != nil {
+		return err
+	}
+	// Walk creates a visible toolbar even with no actions and gives the
+	// client the same top edge. Hide it so the first row is unobstructed.
+	ui.window.ToolBar().SetVisible(false)
+	return nil
 }
 
 func (ui *nativeWindow) show() {
 	if ui.quitting {
 		return
 	}
-	ui.window.Show()
+	ui.window.SetVisible(true)
 	h := ui.window.Handle()
 	if win.IsIconic(h) {
 		win.ShowWindow(h, win.SW_RESTORE)
@@ -251,6 +267,7 @@ func (ui *nativeWindow) finishQuit() {
 				return
 			}
 			ui.cleaned = true
+			ui.window.Dispose()
 			ui.app.Exit(0)
 		})
 	}()

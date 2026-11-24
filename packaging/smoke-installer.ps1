@@ -91,7 +91,8 @@ try {
     Trace-Smoke 'Compiling Win32 window probe'
     Add-Type -Path 'packaging/testdata/NativeWindowProbe.cs' -ReferencedAssemblies @('System.dll','System.Drawing.dll')
     Trace-Smoke 'Starting installed native application'
-    $process = Start-Process $exe -PassThru
+    $nativeStderr = Join-Path $testRoot 'native.stderr'
+    $process = Start-Process $exe -PassThru -RedirectStandardError $nativeStderr
     Trace-Smoke "Started native PID $($process.Id)"
     $handle = Wait-For 'native Win32 setup window' {
         if ($process.HasExited) { throw 'Application exited before showing its window.' }
@@ -147,6 +148,7 @@ try {
     if ($runningAttempt -eq 0 -or -not (Test-Path $exe)) { throw 'Uninstall must stop while KeyDock Connect is running.' }
     [KeyDockWindowProbe]::HideViaClose($handle)
     $null = Wait-For 'hidden native window' { -not [KeyDockWindowProbe]::IsWindowVisible($handle) }
+    if ($process.HasExited) { throw "Primary exited after hide (exit $($process.ExitCode))" }
     Trace-Smoke 'Testing second launch'
     $second = Start-Process $exe -PassThru
     if (-not $second.WaitForExit(12000)) { $second.Kill(); throw 'Second launch timed out' }
@@ -169,6 +171,7 @@ try {
     [KeyDockWindowProbe]::CaptureTray($popup,$sink,(Join-Path $shots '04-tray-menu.png'))
     [KeyDockWindowProbe]::ExitViaMenu($popup)
     if (-not $process.WaitForExit(15000)) { throw 'The installed application did not exit through its notification-area menu.' }
+    if ($process.ExitCode -ne 0) { throw "Tray exit failed (exit $($process.ExitCode))" }
 
     # Simulate a user edit outside the app. The uninstaller must retain the
     # credential executable and configuration until this conflict is resolved.
@@ -196,6 +199,13 @@ try {
     throw
 } finally {
     if ($null -ne $process -and -not $process.HasExited) { $process.Kill(); $null = $process.WaitForExit(5000) }
+    if ($nativeStderr -and (Test-Path -LiteralPath $nativeStderr)) {
+        $crash = [IO.File]::ReadAllText($nativeStderr)
+        foreach ($sensitive in @('fixture-device-key','intentionally-wrong-synthetic-key','synthetic-ci-helper-key')) {
+            $crash = $crash.Replace($sensitive,'[REDACTED]')
+        }
+        if ($crash) { Add-Content -Encoding UTF8 -LiteralPath $evidence -Value ("Native stderr:`n" + $crash) }
+    }
     if (-not $fixture.HasExited) { $fixture.Kill(); $null = $fixture.WaitForExit(5000) }
     if ($null -ne $authority) {
         $path = 'Cert:\LocalMachine\Root\' + $authority.Thumbprint

@@ -20,6 +20,11 @@ public static class KeyDockWindowProbe {
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern bool IsWindowEnabled(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hwnd,out Rect rect);
+    [DllImport("dwmapi.dll")] private static extern int DwmGetWindowAttribute(IntPtr window,int attr,out Rect value,int size);
+    [DllImport("user32.dll")] private static extern bool GetClientRect(IntPtr window,out Rect value);
+    [DllImport("user32.dll")] private static extern bool ClientToScreen(IntPtr window,ref Point pt);
+    [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] private static extern bool PrintWindow(IntPtr hwnd,IntPtr hdc,uint flags);
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern int GetMenuString(IntPtr menu,uint pos,StringBuilder text,int len,uint byPosition);
     [DllImport("user32.dll")] private static extern int GetSystemMetrics(int index);
@@ -83,7 +88,7 @@ public static class KeyDockWindowProbe {
     }
     private static void BoundedCapture(Action capture){
         Exception failure=null;
-        var thread=new System.Threading.Thread(new System.Threading.ThreadStart(delegate(){try{capture();}catch(Exception e){failure=e;}}));
+        var thread=new System.Threading.Thread(new System.Threading.ThreadStart(delegate(){try{SetThreadDpiAwarenessContext((IntPtr)(-4));capture();}catch(Exception e){failure=e;}}));
         thread.IsBackground=true;thread.Start();
         if(!thread.Join(8000))throw new TimeoutException("Native screenshot timed out");
         if(failure!=null)throw new Exception("Native capture failed",failure);
@@ -92,18 +97,41 @@ public static class KeyDockWindowProbe {
     private static void CaptureWindow(IntPtr hwnd,string path){
         DwmFlush();
         Rect r;if(!GetWindowRect(hwnd,out r))throw new Exception("Cannot read native window bounds");
-        using(var img=new Bitmap(r.right-r.left,r.bottom-r.top,PixelFormat.Format24bppRgb)){
-            var bounds=new Rectangle(0,0,img.Width,img.Height);
+        var window=Rectangle.FromLTRB(r.left,r.top,r.right,r.bottom);
+        var visible=window;
+        Rect frame;
+        // DWMWA_EXTENDED_FRAME_BOUNDS removes the invisible resize borders.
+        if(DwmGetWindowAttribute(hwnd,9,out frame,Marshal.SizeOf(typeof(Rect)))==0){
+            var bounds=Rectangle.FromLTRB(frame.left,frame.top,frame.right,frame.bottom);
+            if(bounds.Width>0 && bounds.Height>0 && window.Contains(bounds))visible=bounds;
+        }
+        if(visible==window && (GetStyle(hwnd,-16)&0x40000)!=0){
+            // Noncomposited sessions can report the full resize rect. Keep the
+            // caption while trimming side and bottom frames to client bounds.
+            Rect client;var origin=new Point();
+            if(GetClientRect(hwnd,out client) && ClientToScreen(hwnd,ref origin)){
+                var bounds=Rectangle.FromLTRB(origin.X,window.Top,origin.X+client.right,origin.Y+client.bottom);
+                if(bounds.Width>0 && bounds.Height>0 && window.Contains(bounds))visible=bounds;
+            }
+        }
+        if(GetForegroundWindow()==hwnd){
+            try{
+                using(var screen=new Bitmap(visible.Width,visible.Height,PixelFormat.Format24bppRgb)){
+                    using(var g=Graphics.FromImage(screen))g.CopyFromScreen(visible.Location,Point.Empty,screen.Size);
+                    if(HasContent(screen,new Rectangle(Point.Empty,screen.Size))){screen.Save(path,ImageFormat.Png);return;}
+                }
+            }catch(System.ComponentModel.Win32Exception){ /* Session may lack a readable desktop. */ }
+        }
+        // Render the window at its HWND origin, then retain just its visible frame.
+        using(var surface=new Bitmap(window.Width,window.Height,PixelFormat.Format24bppRgb)){
             bool ok;
-            using(var graphics=Graphics.FromImage(img)){
+            using(var graphics=Graphics.FromImage(surface)){
                 var dc=graphics.GetHdc();
                 try {ok=PrintWindow(hwnd,dc,2);} finally {graphics.ReleaseHdc(dc);}
             }
-            if(!ok || !HasContent(img,bounds)){
-                using(var graphics=Graphics.FromImage(img))graphics.CopyFromScreen(r.left,r.top,0,0,img.Size);
-            }
-            if(!HasContent(img,bounds))throw new Exception("Windows returned an empty native window capture");
-            img.Save(path,ImageFormat.Png);
+            var crop=visible;crop.Offset(-window.Left,-window.Top);
+            if(!ok || !HasContent(surface,crop))throw new Exception("Windows returned an empty native window capture");
+            using(var result=surface.Clone(crop,PixelFormat.Format24bppRgb))result.Save(path,ImageFormat.Png);
         }
     }
     public static void CaptureTray(IntPtr popup,IntPtr sink,string path){BoundedCapture(delegate(){CaptureTrayWindow(popup,sink,path);});}
