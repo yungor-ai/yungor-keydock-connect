@@ -30,6 +30,6 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-H=windowsg
 python3 scripts/package-core.py dist/app
 ```
 
-在 Windows 上从仓库根目录运行 `ISCC.exe packaging/keydock-connect.iss` 生成按用户安装的安装包。安装目录中的凭据助手需要保留在固定位置。GitHub Actions 使用 Windows runner 测试并生成安装程序与 SHA-256，产物可在对应工作流运行的 Artifacts 中下载。
+在已安装 Inno Setup 的 Windows 电脑上，从仓库根目录运行 `./packaging/build-installer.ps1` 生成按用户安装的安装包。安装目录中的凭据助手需要保留在固定位置。GitHub Actions 使用 Windows runner 测试并生成安装程序与 SHA-256，产物可在对应工作流运行的 Artifacts 中下载。
 
 Go 入口位于 `cmd/keydock-connect`。设备包、Codex 配置、系统代理和本地界面分别位于 `internal/bundle`、`internal/codex`、`internal/proxy`、`internal/desktop`。第三方代理内核与规则数据的版本、下载地址和哈希记录在 `scripts/package-core.py`，随附来源和许可位于安装目录的 `licenses`。

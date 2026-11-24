@@ -1,4 +1,4 @@
-#define AppName "KeyDock Connect"
+﻿#define AppName "KeyDock Connect"
 #define AppExe "KeyDockConnect.exe"
 #ifndef AppVersion
   #define AppVersion "0.1.0"
@@ -24,7 +24,7 @@ WizardStyle=modern
 CloseApplications=no
 
 [Languages]
-Name: "zh"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+Name: "zh"; MessagesFile: "..\dist\inno-language\ChineseSimplified.isl"
 Name: "en"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]

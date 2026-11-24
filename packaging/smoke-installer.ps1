@@ -73,7 +73,9 @@ try {
 
     # Simulate a user edit outside the app. The uninstaller must retain the
     # credential executable and configuration until this conflict is resolved.
-    [IO.File]::AppendAllText($config, "# external edit`n")
+    $externalEdit = $encoding.GetString($managed).Replace($profile.BaseURL, 'https://other.example.invalid/v1')
+    if ($externalEdit -ceq $encoding.GetString($managed)) { throw 'No managed base URL to edit.' }
+    [IO.File]::WriteAllText($config, $externalEdit)
     $modifiedHash = (Get-FileHash $config).Hash
     $conflict = Start-Process $uninstaller -ArgumentList $flags -Wait -PassThru
     if ($conflict.ExitCode -eq 0 -or -not (Test-Path $exe) -or (Get-FileHash $config).Hash -ne $modifiedHash) {

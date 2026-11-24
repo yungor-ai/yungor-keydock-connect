@@ -321,3 +321,33 @@ func TestKeepEditedInlineOtherProvider(t *testing.T) {
 		t.Fatal("foreign inline provider lost")
 	}
 }
+
+func TestEditDuringPrepareCanBeRetried(t *testing.T) {
+	store, home, dir := testStore(t), t.TempDir(), t.TempDir()
+	path := filepath.Join(home, "config.toml")
+	const latest = "# a different editor saved this before our commit\n"
+	protect := store.seal
+	edited := false
+	store.seal = func(data []byte) ([]byte, error) {
+		if !edited {
+			edited = true
+			mustWrite(t, path, latest)
+		}
+		return protect(data)
+	}
+	if err := store.apply(home, dir, gateway, "first", "key"); !errors.Is(err, conflict) {
+		t.Fatalf("expected concurrent change detection: %v", err)
+	}
+	if got := read(t, path); got != latest {
+		t.Fatal("concurrent edit overwritten")
+	}
+	if err := store.apply(home, dir, gateway, "first", "key"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.restore(home, dir); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, path); got != latest {
+		t.Fatal("retry lost previous edit")
+	}
+}

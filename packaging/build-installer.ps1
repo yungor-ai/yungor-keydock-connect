@@ -24,6 +24,21 @@ if (-not $compiler) {
     $compiler = Join-Path $toolDir 'ISCC.exe'
 }
 
+# Inno 7 ships the simplified Chinese catalog. Inno 6 only carries it in
+# its source repository; verify that exact translation before compiling it.
+$langDir = New-Item -Force -ItemType Directory 'dist/inno-language'
+$chinese = Join-Path $langDir.FullName 'ChineseSimplified.isl'
+$included = Join-Path (Split-Path $compiler) 'Languages\ChineseSimplified.isl'
+if (Test-Path $included) {
+    Copy-Item $included $chinese -Force
+} else {
+    $url = 'https://raw.githubusercontent.com/jrsoftware/issrc/c2913c993858a781fcb455bac8b8949c1c366cb8/Files/Languages/Unofficial/ChineseSimplified.isl'
+    Invoke-WebRequest -Uri $url -OutFile $chinese
+    if ((Get-FileHash $chinese).Hash -ne '7d544b9bb1d142cfa11f2e5d3cc8abe2e55f8e066c5124e3772675aa236e1278') {
+        throw 'Inno Setup language file checksum mismatch.'
+    }
+}
+
 & $compiler 'packaging/keydock-connect.iss'
 if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE." }
 $installer = Get-Item 'dist/installer/KeyDockConnect-Setup-windows-x64.exe'

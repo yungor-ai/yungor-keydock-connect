@@ -2,9 +2,12 @@
 """Add the pinned Windows x64 proxy core, offline routing data and sources to a bundle."""
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
+import re
 import shutil
+import subprocess
 import tarfile
 import tempfile
 import urllib.request
@@ -60,6 +63,79 @@ def unpack_source(path, dest, prefix):
             (dest / name).write_bytes(archive.extractfile(member).read())
     shutil.copyfile(path, dest / "source.tar.gz")
 
+NOTICE_NAME = re.compile(r"^(licen[sc]e|copying|notice|patents)(?:$|[-._].*)", re.IGNORECASE)
+
+def go_notices(destination):
+    """Collect notices from the exact toolchain and the Windows executable's build graph."""
+    environment = dict(os.environ, GOOS="windows", GOARCH="amd64", CGO_ENABLED="0")
+    root = Path(__file__).resolve().parent.parent
+
+    def go(*args):
+        return subprocess.check_output(["go", *args], cwd=root, env=environment, encoding="utf-8")
+
+    info = json.loads(go("env", "-json", "GOROOT", "GOVERSION"))
+    goroot = Path(info["GOROOT"])
+    version = info["GOVERSION"]
+    stdlib = destination / "go-runtime"
+    stdlib.mkdir(parents=True)
+    # Homebrew relocates the distribution's LICENSE to the parent of libexec.
+    runtime_license = goroot / "LICENSE"
+    if not runtime_license.is_file():
+        runtime_license = goroot.parent / "LICENSE"
+    if not runtime_license.is_file() or "The Go Authors" not in runtime_license.read_text(encoding="utf-8"):
+        raise RuntimeError(f"Cannot locate the Go distribution license for {version}")
+    shutil.copyfile(runtime_license, stdlib / "LICENSE")
+
+    def copy_notices(folder, target):
+        notices = [f for f in folder.iterdir() if f.is_file() and NOTICE_NAME.match(f.name)]
+        for notice in sorted(notices):
+            target.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(notice, target / notice.name)
+        return notices
+
+    copy_notices(goroot, stdlib)
+    # A package can inherit a notice from the module root or any parent, e.g.
+    # GOROOT/src/vendor/golang.org/x/text/LICENSE.
+    graph = go("list", "-deps", "-json=Dir,Standard,Module", "./cmd/keydock-connect")
+    decoder = json.JSONDecoder()
+    visited = set()
+    modules = set()
+    position = 0
+    while position < len(graph):
+        if graph[position].isspace():
+            position += 1
+            continue
+        package, position = decoder.raw_decode(graph, position)
+        directory = Path(package["Dir"])
+        if package.get("Standard"):
+            project, target = goroot, stdlib
+        else:
+            module = package["Module"]
+            if module.get("Main"):
+                continue
+            resolved = module.get("Replace", module)
+            project = Path(resolved["Dir"])
+            identifier = module["Path"] + "@" + (resolved.get("Version") or "local")
+            target = destination / "go-modules" / identifier
+            modules.add(identifier)
+
+        while directory != project:
+            relative = directory.relative_to(project)
+            if directory in visited:
+                break
+            visited.add(directory)
+            copy_notices(directory, target / relative)
+            directory = directory.parent
+
+        if project != goroot and project not in visited:
+            visited.add(project)
+            if not copy_notices(project, target):
+                raise RuntimeError(f"Missing upstream license for {identifier}")
+
+    (destination / "GO-COMPONENTS.txt").write_text(
+        "KeyDock Connect Windows x64\nGo runtime and standard library: " + version
+        + "\n\nLinked modules:\n" + "\n".join(sorted(modules)) + "\n", encoding="utf-8")
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bundle", type=Path, nargs="?", default=Path("dist/app"))
@@ -79,6 +155,7 @@ def main():
         for name in ("GeoSite.dat", "geoip.metadb"):
             shutil.copyfile(assets[name], core / name)
         licenses = stage / "licenses"
+        go_notices(licenses)
         for project, archive, prefix in (
             ("mihomo", "mihomo-source.tar.gz", "mihomo-" + CORE_COMMIT),
             ("meta-rules-dat", "meta-rules-source.tar.gz", "meta-rules-dat-" + GEO_SOURCE),

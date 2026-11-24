@@ -259,7 +259,14 @@ func (store storage) transition(dir string, s *state, operation pending, next sn
 		return err
 	}
 	if cur.digest() != operation.Before {
-		return conflict
+		// No config write was attempted. Discard this prepared operation so a
+		// subsequent retry can merge a concurrent editor's newer changes.
+		s.Pending = nil
+		previous := s
+		if s.Active == nil {
+			previous = nil
+		}
+		return errors.Join(conflict, store.save(dir, previous))
 	}
 	if next.Present {
 		err = writeAtomic(path, next.Data, next.Mode)
