@@ -109,7 +109,7 @@ try {
     $null = Wait-For 'initial connection status' {
         [KeyDockWindowProbe]::Text([KeyDockWindowProbe]::Child($handle,'checks','')) -match '设备授权 · 待检查'
     }
-    [KeyDockWindowProbe]::Capture($handle,(Join-Path $shots '01-first-launch.png'))
+    [KeyDockWindowProbe]::Capture($handle,(Join-Path $shots '01-first-launch.png'),'设备接入')
     [KeyDockWindowProbe]::Enter($serverField,$origin)
     [KeyDockWindowProbe]::Enter($keyField,'intentionally-wrong-synthetic-key')
     [KeyDockWindowProbe]::Click($startButton)
@@ -118,7 +118,7 @@ try {
         $retry = [KeyDockWindowProbe]::Child($handle,'button','连接并测试')
         $checks -match '设备授权 · 失败' -and $checks -match '401' -and $retry -ne [IntPtr]::Zero
     }
-    [KeyDockWindowProbe]::Capture($handle,(Join-Path $shots '02-device-key-error.png'))
+    [KeyDockWindowProbe]::Capture($handle,(Join-Path $shots '02-device-key-error.png'),'设备接入')
     [KeyDockWindowProbe]::Enter($keyField,'fixture-device-key')
     [KeyDockWindowProbe]::Click($startButton)
     $null = Wait-For 'four native connection checks' {
@@ -131,7 +131,7 @@ try {
     if ($encoding.GetString($managed).Contains($profile.Key)) { throw 'The Codex profile contains a plaintext key.' }
     $shot = Join-Path (Resolve-Path dist/installer).Path 'KeyDockConnect-window.png'
     $connectedShot = Join-Path $shots '03-connected.png'
-    [KeyDockWindowProbe]::Capture($handle,$connectedShot)
+    [KeyDockWindowProbe]::Capture($handle,$connectedShot,'Windows smoke test · synthetic-model')
     Copy-Item $connectedShot $shot -Force
     Trace-Smoke 'Checking installed DPAPI credential helper'
     $info = New-Object Diagnostics.ProcessStartInfo
@@ -160,9 +160,12 @@ try {
     # Exercise the pinned Walk version's real Shell_NotifyIcon callback and its menu.
     [KeyDockWindowProbe]::SelectTray($sink)
     $null = Wait-For 'visible native window after notification-area selection' { [KeyDockWindowProbe]::IsWindowVisible($handle) }
+    Trace-Smoke ([KeyDockWindowProbe]::DesktopInfo($sink))
     [KeyDockWindowProbe]::OpenTrayMenu($sink)
+    Start-Sleep -Milliseconds 250
+    Trace-Smoke ([KeyDockWindowProbe]::DesktopInfo($sink))
     $popup = Wait-For 'tray context menu' {
-        $h = [KeyDockWindowProbe]::Window($process.Id,'#32768',$null)
+        $h = [KeyDockWindowProbe]::TrayPopup($sink)
         if ($h -ne [IntPtr]::Zero -and [KeyDockWindowProbe]::IsWindowVisible($h)) { $h }
     }
     if ([KeyDockWindowProbe]::MenuLabel($popup,0) -ne '打开 KeyDock Connect' -or [KeyDockWindowProbe]::MenuLabel($popup,1) -ne '退出接入助手') {

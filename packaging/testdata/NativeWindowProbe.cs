@@ -24,12 +24,50 @@ public static class KeyDockWindowProbe {
     [DllImport("user32.dll")] private static extern bool GetClientRect(IntPtr window,out Rect value);
     [DllImport("user32.dll")] private static extern bool ClientToScreen(IntPtr window,ref Point pt);
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern IntPtr GetParent(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] private static extern bool PrintWindow(IntPtr hwnd,IntPtr hdc,uint flags);
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern int GetMenuString(IntPtr menu,uint pos,StringBuilder text,int len,uint byPosition);
     [DllImport("user32.dll")] private static extern int GetSystemMetrics(int index);
     [DllImport("shell32.dll")] private static extern int Shell_NotifyIconGetRect(ref TrayItem id,out Rect box);
     [DllImport("dwmapi.dll")] private static extern int DwmFlush();
+    [DllImport("user32.dll")] private static extern bool GetGUIThreadInfo(uint thread,ref GuiInfo info);
+    [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern IntPtr FindWindowEx(IntPtr parent,IntPtr after,string cls,string caption);
+    [DllImport("user32.dll")] private static extern bool AllowSetForegroundWindow(uint process);
+    [DllImport("user32.dll")] private static extern IntPtr GetShellWindow();
+    [DllImport("user32.dll")] private static extern IntPtr GetProcessWindowStation();
+    [DllImport("user32.dll")] private static extern IntPtr GetThreadDesktop(uint thread);
+    [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern bool GetUserObjectInformation(IntPtr obj,int index,StringBuilder data,int size,out int needed);
+    [DllImport("user32.dll",EntryPoint="GetUserObjectInformationW")] private static extern bool UserFlags(IntPtr obj,int index,out ObjectFlags flags,int size,out int needed);
+    [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
+    [DllImport("kernel32.dll")] private static extern uint WTSGetActiveConsoleSessionId();
+    [StructLayout(LayoutKind.Sequential)] private struct ObjectFlags {public int inherit,reserved;public uint flags;}
+    [StructLayout(LayoutKind.Sequential)] private struct GuiInfo {public uint size,flags;public IntPtr active,focus,capture,owner,move,caret;public Rect caretBounds;}
+    private static string ObjectName(IntPtr obj){var name=new StringBuilder(128);int needed;return GetUserObjectInformation(obj,2,name,name.Capacity*2,out needed)?name.ToString():"unknown";}
+    private static string Describe(IntPtr h){uint pid;GetWindowThreadProcessId(h,out pid);return string.Format("0x{0:x}/{1}/pid{2}",h.ToInt64(),Class(h),pid);}
+    public static string DesktopInfo(IntPtr sink){
+        uint process;uint thread=GetWindowThreadProcessId(sink,out process);
+        var info=new GuiInfo{size=(uint)Marshal.SizeOf(typeof(GuiInfo))};bool got=GetGUIThreadInfo(thread,ref info);
+        var station=GetProcessWindowStation();int needed;ObjectFlags flags;UserFlags(station,1,out flags,Marshal.SizeOf(typeof(ObjectFlags)),out needed);
+        var windowClasses=new StringBuilder();
+        EnumWindows((h,a)=>{uint pid;GetWindowThreadProcessId(h,out pid);if(pid==process || Class(h)=="#32768")windowClasses.AppendFormat(" [{0},visible={1}]",Describe(h),IsWindowVisible(h));return true;},IntPtr.Zero);
+        var taskbar=FindWindowEx(IntPtr.Zero,IntPtr.Zero,"Shell_TrayWnd",null);Rect r;bool tray=TrayRect(sink,out r);
+        return string.Format("session={0}, console={1}, station={2}, stationVisible={3}, desktop={4}, shell={5}, taskbar={6}/visible={7}, iconRect={8}, foreground={9}, GUIThread={10}/ok={11}/flags=0x{12:x}/active={13}/menuOwner={14}, nativeWindows:{15}",
+            System.Diagnostics.Process.GetCurrentProcess().SessionId,WTSGetActiveConsoleSessionId(),ObjectName(station),(flags.flags&1)!=0,ObjectName(GetThreadDesktop(GetCurrentThreadId())),Describe(GetShellWindow()),Describe(taskbar),IsWindowVisible(taskbar),tray,Describe(GetForegroundWindow()),thread,got,info.flags,Describe(info.active),Describe(info.owner),windowClasses);
+    }
+    public static IntPtr TrayPopup(IntPtr sink){
+        uint process;uint thread=GetWindowThreadProcessId(sink,out process);
+        var gui=new GuiInfo{size=(uint)Marshal.SizeOf(typeof(GuiInfo))};GetGUIThreadInfo(thread,ref gui);
+        IntPtr found=IntPtr.Zero;
+        EnumWindows((h,a)=>{
+            if(!IsWindowVisible(h) || Class(h)!="#32768")return true;
+            uint pid;uint tid=GetWindowThreadProcessId(h,out pid);
+            if(pid!=process && tid!=thread && (gui.owner!=sink || MenuLabel(h,0)!="打开 KeyDock Connect"))return true;
+            found=h;return false;
+        },IntPtr.Zero);
+        return found;
+    }
     [StructLayout(LayoutKind.Sequential)] private struct TrayItem {public uint size; public IntPtr window; public uint id; public Guid guid;}
     [StructLayout(LayoutKind.Sequential)] private struct Rect {public int left,top,right,bottom;}
     private static string Class(IntPtr h){var s=new StringBuilder(128);GetClassName(h,s,s.Capacity);return s.ToString();}
@@ -62,14 +100,15 @@ public static class KeyDockWindowProbe {
     public static void HideViaClose(IntPtr h){Post(h,0x10,IntPtr.Zero,IntPtr.Zero);}
     public static void SelectTray(IntPtr sink){if(sink==IntPtr.Zero)throw new Exception("No native tray callback window");Post(sink,0x403,IntPtr.Zero,(IntPtr)0x400);}
     private static bool TrayRect(IntPtr sink,out Rect box){
-        var item=new TrayItem {size=(uint)Marshal.SizeOf(typeof(TrayItem)),window=sink,guid=new Guid("ad3e9258-1960-428e-a59f-407e2d9469e3")};
+        var item=new TrayItem {size=(uint)Marshal.SizeOf(typeof(TrayItem)),guid=new Guid("ad3e9258-1960-428e-a59f-407e2d9469e3")};
         return Shell_NotifyIconGetRect(ref item,out box)==0 && box.right>box.left && box.bottom>box.top;
     }
     public static void OpenTrayMenu(IntPtr sink) {
         Rect box; int x,y;
         if(TrayRect(sink,out box)) { x=(box.left+box.right)/2; y=box.top-2; }
         else { x=GetSystemMetrics(0)-24; y=GetSystemMetrics(1)-48; }
-        Post(sink,0x403,(IntPtr)((x & 65535)|((y & 65535)<<16)),(IntPtr)0x7B);
+        uint process;GetWindowThreadProcessId(sink,out process);AllowSetForegroundWindow(process);
+        if(!Post(sink,0x403,(IntPtr)((x & 65535)|((y & 65535)<<16)),(IntPtr)0x7B))throw new Exception("Could not post shell context menu callback");
     }
     public static string MenuLabel(IntPtr pop,int index){var s=new StringBuilder(200);IntPtr menu;if(Send(pop,0x1e1,IntPtr.Zero,IntPtr.Zero,TimedFlags,1200,out menu)==IntPtr.Zero)throw new TimeoutException("Native tray menu did not respond");GetMenuString(menu,(uint)index,s,s.Capacity,0x400);return s.ToString();}
     public static void ExitViaMenu(IntPtr pop){Post(pop,0x100,(IntPtr)0x23,IntPtr.Zero); Post(pop,0x100,(IntPtr)0x0D,IntPtr.Zero);}
@@ -93,8 +132,38 @@ public static class KeyDockWindowProbe {
         if(!thread.Join(8000))throw new TimeoutException("Native screenshot timed out");
         if(failure!=null)throw new Exception("Native capture failed",failure);
     }
-    public static void Capture(IntPtr hwnd,string path){BoundedCapture(delegate(){CaptureWindow(hwnd,path);});}
-    private static void CaptureWindow(IntPtr hwnd,string path){
+    public static void Capture(IntPtr hwnd,string path,string heading){BoundedCapture(delegate(){CaptureWindow(hwnd,path,heading);});}
+
+    private static void SaveWindow(Bitmap image,string path,IntPtr hwnd,Rectangle frame,string heading,string source){
+        image.Save(path,ImageFormat.Png);
+        if(heading==null)return;
+        IntPtr label=IntPtr.Zero;
+        EnumChildWindows(hwnd,(h,a)=>{
+            if(Class(h).Equals("static",StringComparison.OrdinalIgnoreCase) && IsWindowVisible(h) && Text(h)==heading){
+                label=h;return false;
+            }
+            return true;
+        },IntPtr.Zero);
+        Rect inner,parent;
+        if(label==IntPtr.Zero || !GetWindowRect(label,out inner) || !GetWindowRect(GetParent(label),out parent))
+            throw new Exception("The visible heading STATIC was not found");
+        var area=Rectangle.FromLTRB(inner.left-frame.Left,inner.top-frame.Top,inner.right-frame.Left,inner.bottom-frame.Top);
+        var row=Rectangle.FromLTRB(parent.left-frame.Left,parent.top-frame.Top,parent.right-frame.Left,parent.bottom-frame.Top);
+        var dpi=(int)GetDpiForWindow(label);
+        int top=area.Bottom,bottom=area.Top-1;
+        if(new Rectangle(Point.Empty,image.Size).Contains(area)){
+            for(int y=area.Top;y<area.Bottom;y++)for(int x=area.Left;x<area.Right;x++){
+                var c=image.GetPixel(x,y);
+                if(c.R<140 && c.G<140 && c.B<140){top=Math.Min(top,y);bottom=Math.Max(bottom,y);break;}
+            }
+        }
+        int ink=Math.Max(0,bottom-top+1);
+        Console.WriteLine("Heading capture: {0}, DPI {1}, row {2}, STATIC {3}, visible ink y {4}..{5} ({6} px)",source,dpi,row,area,top,bottom,ink);
+        if(dpi<=0 || area.Height*96<26*dpi || row.Height*96<26*dpi || ink*96<10*dpi){
+            throw new Exception("The native title is clipped or its text was not painted in full");
+        }
+    }
+    private static void CaptureWindow(IntPtr hwnd,string path,string heading=null){
         DwmFlush();
         Rect r;if(!GetWindowRect(hwnd,out r))throw new Exception("Cannot read native window bounds");
         var window=Rectangle.FromLTRB(r.left,r.top,r.right,r.bottom);
@@ -118,7 +187,7 @@ public static class KeyDockWindowProbe {
             try{
                 using(var screen=new Bitmap(visible.Width,visible.Height,PixelFormat.Format24bppRgb)){
                     using(var g=Graphics.FromImage(screen))g.CopyFromScreen(visible.Location,Point.Empty,screen.Size);
-                    if(HasContent(screen,new Rectangle(Point.Empty,screen.Size))){screen.Save(path,ImageFormat.Png);return;}
+                    if(HasContent(screen,new Rectangle(Point.Empty,screen.Size))){SaveWindow(screen,path,hwnd,visible,heading,"desktop");return;}
                 }
             }catch(System.ComponentModel.Win32Exception){ /* Session may lack a readable desktop. */ }
         }
@@ -131,7 +200,7 @@ public static class KeyDockWindowProbe {
             }
             var crop=visible;crop.Offset(-window.Left,-window.Top);
             if(!ok || !HasContent(surface,crop))throw new Exception("Windows returned an empty native window capture");
-            using(var result=surface.Clone(crop,PixelFormat.Format24bppRgb))result.Save(path,ImageFormat.Png);
+            using(var result=surface.Clone(crop,PixelFormat.Format24bppRgb))SaveWindow(result,path,hwnd,visible,heading,"PrintWindow");
         }
     }
     public static void CaptureTray(IntPtr popup,IntPtr sink,string path){BoundedCapture(delegate(){CaptureTrayWindow(popup,sink,path);});}

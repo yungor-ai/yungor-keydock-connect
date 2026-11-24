@@ -20,7 +20,8 @@ type nativeWindow struct {
 	controller                      *desktop.Controller
 	window                          *walk.MainWindow
 	server, key                     *walk.LineEdit
-	device, message                 *walk.Label
+	device                          *walk.TextLabel
+	message                         *walk.Label
 	checks                          *walk.TextEdit
 	connect, proxy, launch, restore *walk.PushButton
 	state                           desktop.State
@@ -111,8 +112,11 @@ func runWindow(dir string, controller *desktop.Controller) error {
 }
 
 func (ui *nativeWindow) build(icon *walk.Icon) error {
-	err := (d.MainWindow{AssignTo: &ui.window, Title: "KeyDock Connect", Visible: false, Icon: icon, Size: d.Size{Width: 590, Height: 490}, MinSize: d.Size{Width: 490, Height: 435}, Layout: d.VBox{Margins: d.Margins{Left: 18, Top: 16, Right: 18, Bottom: 14}, Spacing: 10}, Children: []d.Widget{
-		d.Label{AssignTo: &ui.device, Text: "设备接入", Font: d.Font{PointSize: 12, Bold: true}},
+	err := (d.MainWindow{AssignTo: &ui.window, Title: "KeyDock Connect", Visible: false, Icon: icon, Size: d.Size{Width: 590, Height: 490}, MinSize: d.Size{Width: 490, Height: 435}, Layout: d.VBox{Margins: d.Margins{Left: 18, Top: 28, Right: 18, Bottom: 14}, Spacing: 10}, Children: []d.Widget{
+		// TextLabel top-aligns its inner Win32 STATIC across the full row.
+		// The compact Label centers a separate, font-measured child HWND.
+		d.TextLabel{AssignTo: &ui.device, Text: "设备接入", TextAlignment: d.AlignHNearVNear,
+			MinSize: d.Size{Height: 30}, MaxSize: d.Size{Height: 30}, Font: d.Font{Family: "MS Shell Dlg 2", PointSize: 11}},
 		d.Composite{Layout: d.Grid{Columns: 2, MarginsZero: true, Spacing: 8}, Children: []d.Widget{
 			d.Label{Text: "服务器地址"}, d.LineEdit{AssignTo: &ui.server, Accessibility: d.Accessibility{Name: "服务器地址"}, CueBanner: "https://keydock.example.com"},
 			d.Label{Text: "Device Key"}, d.LineEdit{AssignTo: &ui.key, Accessibility: d.Accessibility{Name: "Device Key"}, PasswordMode: true, CueBanner: "请输入管理员签发的 Device Key"},
@@ -142,9 +146,11 @@ func (ui *nativeWindow) build(icon *walk.Icon) error {
 	if err != nil {
 		return err
 	}
-	// Walk creates a visible toolbar even with no actions and gives the
-	// client the same top edge. Hide it so the first row is unobstructed.
-	ui.window.ToolBar().SetVisible(false)
+	// Walk creates a native toolbar even with no actions. Detach and dispose
+	// of it so no invisible child can participate in printing or cover the header.
+	toolbar := ui.window.ToolBar()
+	ui.window.SetToolBar(nil)
+	toolbar.Dispose()
 	return nil
 }
 
