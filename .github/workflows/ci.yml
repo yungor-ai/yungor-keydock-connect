@@ -58,4 +58,5 @@ jobs:
             dist/installer/KeyDockConnect-Setup-windows-x64.exe
             dist/installer/SHA256SUMS.txt
             dist/installer/KeyDockConnect-window.png
+            dist/installer/screenshots/*.png
           if-no-files-found: error

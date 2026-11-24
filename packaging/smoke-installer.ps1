@@ -67,18 +67,38 @@ try {
     }
     $serverField = [KeyDockWindowProbe]::Child($handle,'server','')
     $keyField = [KeyDockWindowProbe]::Child($handle,'key','')
+    $shots = (New-Item -ItemType Directory -Force -Path 'dist/installer/screenshots').FullName
+    $startButton = Wait-For 'initial action' {
+        $h = [KeyDockWindowProbe]::Child($handle,'button','连接并测试')
+        if ($h -ne [IntPtr]::Zero) { $h }
+    }
+    $null = Wait-For 'initial connection status' {
+        [KeyDockWindowProbe]::Text([KeyDockWindowProbe]::Child($handle,'checks','')) -match '设备授权 · 待检查'
+    }
+    [KeyDockWindowProbe]::Capture($handle,(Join-Path $shots '01-first-launch.png'))
     [KeyDockWindowProbe]::Enter($serverField,$origin)
+    [KeyDockWindowProbe]::Enter($keyField,'intentionally-wrong-synthetic-key')
+    [KeyDockWindowProbe]::Click($startButton)
+    $null = Wait-For 'rejected device credential and enabled retry' {
+        $checks = [KeyDockWindowProbe]::Text([KeyDockWindowProbe]::Child($handle,'checks',''))
+        $retry = [KeyDockWindowProbe]::Child($handle,'button','连接并测试')
+        $checks -match '设备授权 · 失败' -and $checks -match '401' -and $retry -ne [IntPtr]::Zero
+    }
+    [KeyDockWindowProbe]::Capture($handle,(Join-Path $shots '02-device-key-error.png'))
     [KeyDockWindowProbe]::Enter($keyField,'fixture-device-key')
-    [KeyDockWindowProbe]::Click([KeyDockWindowProbe]::Child($handle,'button','连接并测试'))
+    [KeyDockWindowProbe]::Click($startButton)
     $null = Wait-For 'four native connection checks' {
         $checks = [KeyDockWindowProbe]::Text([KeyDockWindowProbe]::Child($handle,'checks',''))
+        $ready = [KeyDockWindowProbe]::Child($handle,'button','打开 Codex')
         $checks -match '设备授权 · 完成' -and $checks -match 'Codex 配置 · 完成' -and
-        $checks -match '模型连通 · 完成' -and $checks -match '代理连通 · 跳过'
+        $checks -match '模型连通 · 完成' -and $checks -match '代理连通 · 跳过' -and $ready -ne [IntPtr]::Zero
     }
     $managed = [IO.File]::ReadAllBytes($config)
     if ($encoding.GetString($managed).Contains($profile.Key)) { throw 'The Codex profile contains a plaintext key.' }
     $shot = Join-Path (Resolve-Path dist/installer).Path 'KeyDockConnect-window.png'
-    [KeyDockWindowProbe]::Capture($handle,$shot)
+    $connectedShot = Join-Path $shots '03-connected.png'
+    [KeyDockWindowProbe]::Capture($handle,$connectedShot)
+    Copy-Item $connectedShot $shot -Force
     $credential = (& $exe --credential | Out-String).Trim()
     if ($credential -cne $profile.Key -or $LASTEXITCODE -ne 0) { throw 'Installed credential helper failed.' }
 
@@ -103,6 +123,7 @@ try {
     if ([KeyDockWindowProbe]::MenuLabel($popup,0) -ne '打开 KeyDock Connect' -or [KeyDockWindowProbe]::MenuLabel($popup,1) -ne '退出接入助手') {
         throw 'The notification-area menu is missing its open or exit action.'
     }
+    [KeyDockWindowProbe]::CaptureTray($popup,$sink,(Join-Path $shots '04-tray-menu.png'))
     [KeyDockWindowProbe]::ExitViaMenu($popup)
     if (-not $process.WaitForExit(15000)) { throw 'The installed application did not exit through its notification-area menu.' }
 
