@@ -45,6 +45,20 @@ public static class KeyDockWindowProbe {
     [DllImport("user32.dll")] private static extern IntPtr GetThreadDesktop(uint thread);
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern bool GetUserObjectInformation(IntPtr obj,int index,StringBuilder data,int size,out int needed);
     [DllImport("user32.dll",EntryPoint="GetUserObjectInformationW")] private static extern bool UserFlags(IntPtr obj,int index,out ObjectFlags flags,int size,out int needed);
+    [DllImport("kernel32.dll",SetLastError=true)] private static extern Microsoft.Win32.SafeHandles.SafeProcessHandle OpenProcess(uint access,bool inherit,uint pid);
+    [DllImport("kernel32.dll",SetLastError=true)] private static extern bool GetExitCodeProcess(Microsoft.Win32.SafeHandles.SafeProcessHandle handle,out uint code);
+    // Retain a query handle before the process exits. Windows PowerShell 5.1's
+    // redirected Start-Process can otherwise return null for Process.ExitCode.
+    public static Microsoft.Win32.SafeHandles.SafeProcessHandle WatchExit(int pid){
+        var h=OpenProcess(0x1000,false,(uint)pid);
+        if(h.IsInvalid)throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        return h;
+    }
+    public static uint ExitStatus(Microsoft.Win32.SafeHandles.SafeProcessHandle handle){
+        uint code;
+        if(!GetExitCodeProcess(handle,out code))throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        return code;
+    }
     [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
     [DllImport("kernel32.dll")] private static extern uint WTSGetActiveConsoleSessionId();
     [StructLayout(LayoutKind.Sequential)] private struct ObjectFlags {public int inherit,reserved;public uint flags;}

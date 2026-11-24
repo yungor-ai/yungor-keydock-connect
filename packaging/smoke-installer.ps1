@@ -66,6 +66,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Failed to build local TLS fixture.' }
 $fixture = Start-Process $fixtureExe -ArgumentList ('"' + $testRoot + '"') -PassThru
 $authority = $null
 $process = $null
+$exitHandle = $null
 $encoding = [Text.Encoding]::UTF8
 function Wait-For($description, [scriptblock]$condition) {
     Trace-Smoke "Waiting for $description"
@@ -93,6 +94,7 @@ try {
     Trace-Smoke 'Starting installed native application'
     $nativeStderr = Join-Path $testRoot 'native.stderr'
     $process = Start-Process $exe -PassThru -RedirectStandardError $nativeStderr
+    $exitHandle = [KeyDockWindowProbe]::WatchExit($process.Id)
     Trace-Smoke "Started native PID $($process.Id)"
     $handle = Wait-For 'native Win32 setup window' {
         if ($process.HasExited) { throw 'Application exited before showing its window.' }
@@ -181,7 +183,9 @@ try {
     [KeyDockWindowProbe]::CaptureTray($popup,$sink,(Join-Path $shots '04-tray-menu.png'))
     [KeyDockWindowProbe]::ExitViaMenu($popup)
     if (-not $process.WaitForExit(15000)) { throw 'The installed application did not exit through its notification-area menu.' }
-    if ($process.ExitCode -ne 0) { throw "Tray exit failed (exit $($process.ExitCode))" }
+    $exitCode = [KeyDockWindowProbe]::ExitStatus($exitHandle)
+    Trace-Smoke "Installed application exited through the tray with code $exitCode"
+    if ($exitCode -ne 0) { throw "Tray exit failed (exit $exitCode)" }
 
     # Simulate a user edit outside the app. The uninstaller must retain the
     # credential executable and configuration until this conflict is resolved.
@@ -203,12 +207,13 @@ try {
     Trace-Smoke ('Failure: ' + $_.Exception.Message)
     if ($null -ne $process) {
         $process.Refresh()
-        if ($process.HasExited) { Trace-Smoke "Native PID $($process.Id) exited with $($process.ExitCode)" }
+        if ($process.HasExited -and $null -ne $exitHandle) { Trace-Smoke "Native PID $($process.Id) exited with $([KeyDockWindowProbe]::ExitStatus($exitHandle))" }
         else { Trace-Smoke "Native PID $($process.Id), main HWND $($process.MainWindowHandle)" }
     }
     throw
 } finally {
     if ($null -ne $process -and -not $process.HasExited) { $process.Kill(); $null = $process.WaitForExit(5000) }
+    if ($null -ne $exitHandle) { $exitHandle.Dispose() }
     if ($nativeStderr -and (Test-Path -LiteralPath $nativeStderr)) {
         $crash = [IO.File]::ReadAllText($nativeStderr)
         foreach ($sensitive in @('fixture-device-key','intentionally-wrong-synthetic-key','synthetic-ci-helper-key')) {
