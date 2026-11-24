@@ -99,6 +99,8 @@ try {
         $h = [KeyDockWindowProbe]::Window($process.Id,$null,'KeyDock Connect')
         if ($h -ne [IntPtr]::Zero -and [KeyDockWindowProbe]::IsWindowVisible($h)) { $h }
     }
+    $initialSink = [KeyDockWindowProbe]::Window($process.Id,'WalkNotifyIconSink',$null)
+    Trace-Smoke ([KeyDockWindowProbe]::DesktopInfo($initialSink))
     $serverField = [KeyDockWindowProbe]::Child($handle,'server','')
     $keyField = [KeyDockWindowProbe]::Child($handle,'key','')
     $shots = (New-Item -ItemType Directory -Force -Path 'dist/installer/screenshots').FullName

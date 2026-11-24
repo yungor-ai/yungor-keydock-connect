@@ -159,7 +159,7 @@ public static class KeyDockWindowProbe {
         }
         int ink=Math.Max(0,bottom-top+1);
         Console.WriteLine("Heading capture: {0}, DPI {1}, row {2}, STATIC {3}, visible ink y {4}..{5} ({6} px)",source,dpi,row,area,top,bottom,ink);
-        if(dpi<=0 || area.Height*96<26*dpi || row.Height*96<26*dpi || ink*96<10*dpi){
+        if(dpi<=0 || area.Height*96<12*dpi || row.Height*96<26*dpi || !row.Contains(area) || ink*96<10*dpi){
             throw new Exception("The native title is clipped or its text was not painted in full");
         }
     }

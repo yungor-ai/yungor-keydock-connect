@@ -20,8 +20,7 @@ type nativeWindow struct {
 	controller                      *desktop.Controller
 	window                          *walk.MainWindow
 	server, key                     *walk.LineEdit
-	device                          *walk.TextLabel
-	message                         *walk.Label
+	device, message                 *walk.Label
 	checks                          *walk.TextEdit
 	connect, proxy, launch, restore *walk.PushButton
 	state                           desktop.State
@@ -113,9 +112,9 @@ func runWindow(dir string, controller *desktop.Controller) error {
 
 func (ui *nativeWindow) build(icon *walk.Icon) error {
 	err := (d.MainWindow{AssignTo: &ui.window, Title: "KeyDock Connect", Visible: false, Icon: icon, Size: d.Size{Width: 590, Height: 490}, MinSize: d.Size{Width: 490, Height: 435}, Layout: d.VBox{Margins: d.Margins{Left: 18, Top: 28, Right: 18, Bottom: 14}, Spacing: 10}, Children: []d.Widget{
-		// TextLabel top-aligns its inner Win32 STATIC across the full row.
-		// The compact Label centers a separate, font-measured child HWND.
-		d.TextLabel{AssignTo: &ui.device, Text: "设备接入", TextAlignment: d.AlignHNearVNear,
+		// Use a fixed-height single-line row. VBox sizes wrapping TextLabel
+		// children by HeightForWidth, ignoring their declared minimum height.
+		d.Label{AssignTo: &ui.device, Text: "设备接入", EllipsisMode: d.EllipsisEnd,
 			MinSize: d.Size{Height: 30}, MaxSize: d.Size{Height: 30}, Font: d.Font{Family: "MS Shell Dlg 2", PointSize: 11}},
 		d.Composite{Layout: d.Grid{Columns: 2, MarginsZero: true, Spacing: 8}, Children: []d.Widget{
 			d.Label{Text: "服务器地址"}, d.LineEdit{AssignTo: &ui.server, Accessibility: d.Accessibility{Name: "服务器地址"}, CueBanner: "https://keydock.example.com"},
