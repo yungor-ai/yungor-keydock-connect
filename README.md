@@ -2,7 +2,7 @@
 
 Windows x64 原生桌面客户端。员工填写 KeyDock 服务地址和分配给本机的设备接入密钥，助手会领取个人模型配置和 SS 订阅，更新 Codex，并在窗口中显示测试结果。
 
-在 KeyDock 服务地址后加上 `/software`，打开「软件下载」，选择 **KeyDock Connect**。也可以从[公开发布页下载 Windows x64 安装包和 SHA-256 校验文件](https://github.com/yungor-ai/yungor-keydock-connect/releases/latest)。已运行旧版时，先从右下角托盘退出助手，再运行新版安装包。
+在 KeyDock 服务地址后加上 `/software`，打开「软件下载」，选择 **KeyDock Connect**。也可以从[公开发布页下载 Windows x64 安装包、免安装 ZIP 和 SHA-256 校验文件](https://github.com/yungor-ai/yungor-keydock-connect/releases/latest)。已运行旧版时，先从右下角托盘退出助手，再运行新版安装包。
 
 ## 首次接入
 
@@ -18,7 +18,7 @@ Windows x64 原生桌面客户端。员工填写 KeyDock 服务地址和分配�
 ## 代理模式和订阅刷新
 
 - **系统代理**是默认模式。使用 Windows 系统代理设置的应用按订阅规则分流，普通 Windows 用户可在接入设备并取得 SS 订阅后启用。
-- **TUN（虚拟网卡）**通过 Windows 路由接管流量，可用于复测 Codex 等应用中绕过系统代理的请求。请由管理员将完整验证包放入 `%ProgramFiles%\KeyDock Connect`，保留 Program Files 默认权限，确认同一目录下有 `KeyDockConnect.exe` 和随包附带的 `core` 目录。先从托盘退出当前实例，再用原 Windows 账号右键该目录中的 `KeyDockConnect.exe`，选择「以管理员身份运行」，然后选择并启用 TUN。启用后，从 Windows 开始菜单正常打开 Codex。若 Windows 已开启其他手动代理或代理设置脚本，请先在原工具中关闭。
+- **TUN（虚拟网卡）**通过 Windows 路由接管流量，可用于复测 Codex 等应用中绕过系统代理的请求。请由管理员校验 `KeyDockConnect-windows-x64.zip`，将完整内容解压到 `%ProgramFiles%\KeyDock Connect`，保留 Program Files 默认权限，确认同一目录下有 `KeyDockConnect.exe` 和随包附带的 `core` 目录。先从托盘退出当前实例，再用原 Windows 账号右键该目录中的 `KeyDockConnect.exe`，选择「以管理员身份运行」，然后选择并启用 TUN。启用后，从 Windows 开始菜单正常打开 Codex。若 Windows 已开启其他手动代理或代理设置脚本，请先在原工具中关闭。
 - 切换模式前先关闭当前模式。启用所选模式后，可在应用中复测实际请求，例如在 Codex 中重新试一次图片操作。
 - 启用代理时立即获取订阅。代理运行期间每小时检查一次，窗口收至托盘后也继续。配置有变化时会重载代理内核，现有连接可能短暂中断。
 - **最近更新时间**以 Windows 本地时间显示到秒。成功启用代理或刷新订阅后更新时间，订阅内容相同也记录这次成功检查。当前订阅首次成功前显示「尚未更新」。关闭代理或重启助手后保留上次成功时间，刷新失败时另有提示。订阅下载或校验失败时继续使用原配置。

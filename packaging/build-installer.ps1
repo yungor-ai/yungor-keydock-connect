@@ -41,8 +41,15 @@ if (Test-Path $included) {
 
 $version = (Get-Content -Raw -LiteralPath 'VERSION').Trim()
 if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid installer version in VERSION." }
+Copy-Item -LiteralPath 'README.md' -Destination 'dist/app/README.md' -Force
 & $compiler "/DAppVersion=$version" 'packaging/keydock-connect.iss'
 if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE." }
 $installer = Get-Item 'dist/installer/KeyDockConnect-Setup-windows-x64.exe'
-$digest = (Get-FileHash $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-[IO.File]::WriteAllText((Join-Path $installer.DirectoryName 'SHA256SUMS.txt'), "$digest  $($installer.Name)`n")
+$portablePath = Join-Path $installer.DirectoryName 'KeyDockConnect-windows-x64.zip'
+Compress-Archive -Path 'dist/app/*' -DestinationPath $portablePath -CompressionLevel Optimal -Force
+$portable = Get-Item -LiteralPath $portablePath
+[string[]]$checksums = foreach ($asset in @($installer, $portable)) {
+    $digest = (Get-FileHash -LiteralPath $asset.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    "$digest  $($asset.Name)"
+}
+[IO.File]::WriteAllLines((Join-Path $installer.DirectoryName 'SHA256SUMS.txt'), $checksums)
