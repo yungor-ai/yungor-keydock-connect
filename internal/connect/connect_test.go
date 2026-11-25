@@ -31,7 +31,7 @@ func TestFetchScopedDevice(t *testing.T) {
 	}))
 	defer s.Close()
 	c := Client{HTTP: s.Client()}
-	fetch := func() (Profile, error) { return c.Fetch(context.Background(), s.URL+"/company/", device) }
+	fetch := func() (DeviceConfig, error) { return c.Fetch(context.Background(), s.URL+"/company/", device) }
 	for _, available := range []any{registration()["subscription_url"], "", nil} {
 		expected["subscription_url"] = available
 		p, err := fetch()
@@ -48,7 +48,7 @@ func TestFetchScopedDevice(t *testing.T) {
 	for _, entry := range []struct {
 		name  string
 		value any
-	}{{"schema_version", 2}, {"model", ""}, {"api_key", ""}, {"api_key", device}, {"api_base_url", "http://example.test"}, {"subscription_url", "https://secret@example.test/private"}, {"subscription_url", 42}} {
+	}{{"schema_version", 2}, {"model", " "}, {"model", 42}, {"api_key", ""}, {"api_key", device}, {"api_base_url", "http://example.test"}, {"subscription_url", "https://secret@example.test/private"}, {"subscription_url", 42}} {
 		expected = registration()
 		expected[entry.name] = entry.value
 		if _, err := fetch(); err == nil {
@@ -61,6 +61,31 @@ func TestFetchScopedDevice(t *testing.T) {
 		t.Fatal("omitted subscription field accepted")
 	}
 }
+
+func TestFetchDefaultsUnassignedModel(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(map[string]any)
+	}{
+		{"omitted", func(p map[string]any) { delete(p, "model") }},
+		{"empty", func(p map[string]any) { p["model"] = "" }},
+		{"null", func(p map[string]any) { p["model"] = nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			profile := registration()
+			tc.set(profile)
+			s := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				json.NewEncoder(w).Encode(profile)
+			}))
+			defer s.Close()
+			got, err := (Client{HTTP: s.Client()}).Fetch(context.Background(), s.URL, device)
+			if err != nil || got.Model != "gpt-6.2-sol" || got.Key != api {
+				t.Fatalf("model fallback failed: model %q, error %v", got.Model, err)
+			}
+		})
+	}
+}
+
 func TestRejectsRedirectAndExcessiveResponses(t *testing.T) {
 	var leaked atomic.Bool
 	var mode string

@@ -7,11 +7,16 @@ import (
 	"errors"
 )
 
-type child struct{}
+type child struct{ mode Mode }
 
-func (m *Manager) Start(string) error { return errors.New("系统代理仅支持 Windows") }
-func (m *Manager) Stop() error        { return nil }
-func (m *Manager) Recover() error     { return nil }
+func (m *Manager) Start(raw string) error              { return m.StartMode(raw, ModeSystem) }
+func (m *Manager) StartMode(_ string, mode Mode) error { return m.CheckMode(mode) }
+func (m *Manager) CheckMode(Mode) error                { return errors.New("代理模式仅支持 Windows") }
+func (m *Manager) Refresh(context.Context, string) error {
+	return nil
+}
+func (m *Manager) Stop() error    { return nil }
+func (m *Manager) Recover() error { return nil }
 
 func (m *Manager) Test(context.Context, string) error {
 	return errors.New("代理连通性检测仅支持 Windows")

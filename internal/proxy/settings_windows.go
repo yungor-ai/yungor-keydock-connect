@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -115,11 +116,18 @@ func (m *Manager) Recover() error {
 	if m.running != nil {
 		return nil
 	}
+	if m.pendingTUN != nil {
+		if err := m.closeChild(m.pendingTUN); err != nil {
+			return err
+		}
+	}
 	err := m.recoverLocked()
 	m.pruneRuntime()
 	return err
 }
-func (m *Manager) recoverLocked() error {
+func (m *Manager) recoverLocked() (resultErr error) {
+	started := time.Now()
+	defer func() { m.logStage("proxy.settings_restore", started, resultErr) }()
 	data, err := os.ReadFile(m.journalPath())
 	if errors.Is(err, os.ErrNotExist) {
 		return nil

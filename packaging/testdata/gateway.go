@@ -51,12 +51,16 @@ func main() {
 	check(err)
 	origin := "https://" + listen.Addr().String()
 	mux := http.NewServeMux()
+	clockSkewFailure := filepath.Join(dir, "proxy-clock-skew-failure")
 	mux.HandleFunc("POST /api/connect/v1/device", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer fixture-device-key" {
 			http.Error(w, "denied", 401)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if _, err := os.Stat(clockSkewFailure); err == nil {
+			w.Header().Set("Date", time.Now().UTC().Add(45*time.Second).Format(http.TimeFormat))
+		}
 		var subscription string
 		if _, err := os.Stat(filepath.Join(dir, "subscription-enabled")); err == nil {
 			subscription = origin + "/subscription"
@@ -64,6 +68,10 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]any{"schema_version": 1, "device_name": "演示工作站", "model": "synthetic-model", "api_base_url": origin + "/v1", "api_key": "synthetic-ci-helper-key", "subscription_url": subscription})
 	})
 	mux.HandleFunc("GET /subscription", func(w http.ResponseWriter, r *http.Request) {
+		if _, err := os.Stat(clockSkewFailure); err == nil {
+			http.Error(w, "fixture proxy unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		// Both fixture keys are synthetic. This server is bound to loopback.
 		fmt.Fprintf(w, "proxies:\n  - {name: test-node, type: ss, server: 127.0.0.1, port: %d, cipher: 2022-blake3-aes-128-gcm, password: \"AAAAAAAAAAAAAAAAAAAAAA==:AQEBAQEBAQEBAQEBAQEBAQ==\"}\nrules: [\"MATCH,test-node\"]\n", ssPort)
 	})

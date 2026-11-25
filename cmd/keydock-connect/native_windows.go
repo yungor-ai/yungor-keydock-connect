@@ -4,13 +4,18 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"time"
+	"unsafe"
 
 	"github.com/tailscale/walk"
 	"github.com/tailscale/win"
 	"github.com/yungor-ai/yungor-keydock-connect/internal/desktop"
 	"golang.org/x/sys/windows"
 )
+
+const exportDiagnosticsLabel = "导出诊断日志"
 
 // This stable GUID also lets Windows retain the user's notification-area preferences.
 var trayGUID = windows.GUID{Data1: 0xad3e9258, Data2: 0x1960, Data3: 0x428e, Data4: [8]byte{0xa5, 0x9f, 0x40, 0x7e, 0x2d, 0x94, 0x69, 0xe3}}
@@ -21,15 +26,20 @@ type nativeWindow struct {
 	window                          *walk.MainWindow
 	server, key                     *walk.LineEdit
 	device, message, proxyHint      *walk.TextLabel
-	proxyState                      *walk.Label
+	clockHint                       *walk.TextLabel
+	troubleshooting                 *walk.Composite
+	proxyState, proxyUpdatedAt      *walk.Label
+	proxyModes                      *walk.ComboBox
 	rows                            []checkRow
 	colors                          windowColors
 	connect, proxy, launch, restore *walk.PushButton
+	export, timeSettings            *walk.PushButton
 	state                           desktop.State
 	cleaned                         bool
 	results                         map[string]desktop.Check
 	cancel                          context.CancelFunc
 	quitting                        bool
+	choosingExportPath              bool
 }
 
 func runWindow(dir string, controller *desktop.Controller) error {
@@ -46,6 +56,11 @@ func runWindow(dir string, controller *desktop.Controller) error {
 	if err := ui.build(icon); err != nil {
 		return err
 	}
+	ui.proxyModes.CurrentIndexChanged().Attach(func() {
+		if !ui.state.Proxy {
+			ui.renderProxy()
+		}
+	})
 	// The Walk layout worker closes its quit channel when App.Exit cancels
 	// the app context. A form may only be disposed while that worker is alive.
 	enteredLoop := false
@@ -99,7 +114,19 @@ func runWindow(dir string, controller *desktop.Controller) error {
 	ui.renderChecks()
 	ui.window.Show() // Starts the form exactly once, after all handlers are ready.
 	enteredLoop = true
+	lifetime, stopRefresh := context.WithCancel(context.Background())
+	go controller.RefreshSubscriptions(lifetime, func() {
+		if lifetime.Err() != nil {
+			return
+		}
+		app.Synchronize(func() {
+			if lifetime.Err() == nil && !ui.quitting && ui.cancel == nil {
+				ui.refresh()
+			}
+		})
+	})
 	app.Run()
+	stopRefresh()
 	if ui.cancel != nil {
 		ui.cancel()
 	}
@@ -110,10 +137,16 @@ func runWindow(dir string, controller *desktop.Controller) error {
 }
 
 func (ui *nativeWindow) show() {
-	if ui.quitting {
+	if ui.quitting || ui.choosingExportPath {
 		return
 	}
-	ui.window.SetVisible(true)
+	if ui.cancel == nil {
+		ui.refresh()
+	}
+	if !ui.window.Visible() {
+		ui.window.SetVisible(true)
+		ui.window.RequestLayout()
+	}
 	h := ui.window.Handle()
 	if win.IsIconic(h) {
 		win.ShowWindow(h, win.SW_RESTORE)
@@ -132,24 +165,6 @@ func (ui *nativeWindow) refresh() {
 	} else {
 		ui.device.SetText("输入管理员提供的服务器地址和设备密钥。")
 	}
-	if ui.state.Proxy {
-		ui.proxy.SetText("关闭系统代理")
-		ui.proxyState.SetText("系统代理已启用")
-		ui.proxyState.SetTextColor(ui.colors.success)
-		ui.proxyHint.SetText("使用系统代理的应用流量正按订阅规则分流。")
-	} else {
-		ui.proxy.SetText("启用系统代理")
-		ui.proxyState.SetText("系统代理未启用")
-		ui.proxyState.SetTextColor(ui.colors.ink)
-		switch {
-		case ui.state.Subscription:
-			ui.proxyHint.SetText("启用后，使用系统代理的应用流量将按订阅规则分流。")
-		case ui.state.Paired:
-			ui.proxyHint.SetText("当前设备未分配 SS 订阅。")
-		default:
-			ui.proxyHint.SetText("连接设备并获取 SS 订阅后，可在此启用。")
-		}
-	}
 	ui.enable()
 }
 
@@ -160,7 +175,60 @@ func (ui *nativeWindow) enable() {
 	ui.connect.SetEnabled(idle)
 	ui.launch.SetEnabled(idle && ui.state.Configured)
 	ui.restore.SetEnabled(idle && ui.state.Restorable)
-	ui.proxy.SetEnabled(idle && (ui.state.Subscription || ui.state.Proxy))
+	ui.export.SetEnabled(idle)
+	ui.timeSettings.SetEnabled(idle)
+	ui.renderProxy()
+}
+
+func (ui *nativeWindow) openTimeSettings() {
+	if windows.GetCurrentProcessToken().IsElevated() {
+		ui.setMessage("请从 Windows 开始菜单打开设置，进入「时间和语言」→「日期和时间」。", ui.colors.accent)
+		return
+	}
+	settings := windows.StringToUTF16Ptr("ms-settings:dateandtime")
+	if err := windows.ShellExecute(windows.Handle(ui.window.Handle()), nil, settings, nil, nil, win.SW_SHOWNORMAL); err != nil {
+		ui.setMessage("无法打开时间设置。请从 Windows 设置中进入「时间和语言」→「日期和时间」。", ui.colors.danger)
+	}
+}
+
+func (ui *nativeWindow) exportDiagnostics() {
+	if ui.cancel != nil || ui.quitting || ui.choosingExportPath {
+		return
+	}
+
+	// Walk's file dialog sets OFN_FILEMUSTEXIST even in save mode. Use the
+	// common dialog directly to allow a new file and confirm replacement.
+	var filename [4096]uint16
+	suggested := "KeyDockConnect-diagnostics-" + time.Now().Format("20060102-150405") + ".json"
+	copy(filename[:], windows.StringToUTF16(suggested))
+	filter := append(windows.StringToUTF16("JSON 文件 (*.json)"), windows.StringToUTF16("*.json")...)
+	filter = append(filter, 0)
+	dlg := win.OPENFILENAME{
+		HwndOwner:    ui.window.Handle(),
+		LpstrFilter:  &filter[0],
+		NFilterIndex: 1,
+		LpstrFile:    &filename[0],
+		NMaxFile:     uint32(len(filename)),
+		LpstrTitle:   windows.StringToUTF16Ptr(exportDiagnosticsLabel),
+		Flags:        win.OFN_EXPLORER | win.OFN_HIDEREADONLY | win.OFN_NOCHANGEDIR | win.OFN_OVERWRITEPROMPT | win.OFN_PATHMUSTEXIST,
+	}
+	dlg.LStructSize = uint32(unsafe.Sizeof(dlg))
+	ui.choosingExportPath = true
+	accepted := win.GetSaveFileName(&dlg)
+	ui.choosingExportPath = false
+	if !accepted {
+		if win.CommDlgExtendedError() != 0 {
+			ui.setMessage("无法打开诊断日志保存窗口", ui.colors.danger)
+		}
+		return
+	}
+	path := windows.UTF16ToString(filename[:])
+	ui.runAction("正在保存诊断日志…", "诊断日志已保存，可发送给管理员。", func(context.Context) error {
+		if err := ui.controller.ExportDiagnostics(path); err != nil {
+			return errors.New("无法保存诊断日志，请选择可写入的位置后重试")
+		}
+		return nil
+	})
 }
 
 func (ui *nativeWindow) startConnect() {
@@ -209,7 +277,7 @@ func (ui *nativeWindow) setMessage(text string, color walk.Color) {
 }
 
 func (ui *nativeWindow) quit() {
-	if ui.quitting {
+	if ui.quitting || ui.choosingExportPath {
 		return
 	}
 	ui.quitting = true

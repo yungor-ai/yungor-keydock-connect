@@ -7,25 +7,27 @@ import (
 
 	"github.com/tailscale/walk"
 	d "github.com/tailscale/walk/declarative"
+	"github.com/tailscale/win"
 	keydockconnect "github.com/yungor-ai/yungor-keydock-connect"
 )
 
 type windowColors struct {
-	ink, muted, accent, success, danger walk.Color
-	page, header, card, proxy, badge    d.Brush
+	ink, muted, accent, success, danger       walk.Color
+	page, header, card, proxy, badge, warning d.Brush
 }
 
 func nativeColors() windowColors {
 	if walk.IsHighContrastEnabled() {
 		// Walk resolves a zero text color and this brush from the Windows theme.
 		surface := d.SystemColorBrush{Color: walk.SysColorWindow}
-		return windowColors{page: surface, header: surface, card: surface, proxy: surface, badge: surface}
+		return windowColors{page: surface, header: surface, card: surface, proxy: surface, badge: surface, warning: surface}
 	}
 	return windowColors{
 		ink: walk.RGB(25, 49, 55), muted: walk.RGB(75, 98, 108), accent: walk.RGB(0, 102, 111),
 		success: walk.RGB(15, 102, 77), danger: walk.RGB(168, 48, 52),
 		page: d.SolidColorBrush{Color: walk.RGB(240, 244, 245)}, header: d.SolidColorBrush{Color: walk.RGB(222, 241, 239)},
 		card: d.WhiteBrush{}, proxy: d.SolidColorBrush{Color: walk.RGB(229, 241, 244)}, badge: d.SolidColorBrush{Color: walk.RGB(240, 245, 246)},
+		warning: d.SolidColorBrush{Color: walk.RGB(255, 246, 224)},
 	}
 }
 
@@ -103,23 +105,48 @@ func (ui *nativeWindow) build(icon *walk.Icon) error {
 				TextAlignment: d.AlignHNearVCenter},
 		)
 	}
-	checks := d.Composite{Background: colors.card, Layout: section, Children: []d.Widget{heading("连接检查"), grid}}
-	proxy := d.Composite{
-		Background: colors.proxy, Layout: d.HBox{Margins: d.Margins{Left: 18, Top: 10, Right: 18, Bottom: 11}, Spacing: 12},
+	checks := d.Composite{Background: colors.card, Layout: section, Children: []d.Widget{
+		d.Composite{Layout: d.HBox{MarginsZero: true, Spacing: 8, Alignment: d.AlignHNearVCenter}, Children: []d.Widget{
+			heading("连接检查"),
+			d.HSpacer{},
+			d.PushButton{AssignTo: &ui.export, Text: exportDiagnosticsLabel, UseLayoutFlags: true,
+				MinSize: d.Size{Width: 126, Height: 28}, OnClicked: ui.exportDiagnostics},
+		}},
+		grid,
+	}}
+	troubleshooting := d.Composite{
+		AssignTo: &ui.troubleshooting, Background: colors.warning,
+		Layout: d.VBox{Margins: d.Margins{Left: 18, Top: 8, Right: 18, Bottom: 10}, Spacing: 4},
 		Children: []d.Widget{
-			d.Composite{StretchFactor: 2, Layout: d.VBox{MarginsZero: true, Spacing: 4}, Children: []d.Widget{
+			d.Composite{Layout: d.HBox{MarginsZero: true, Spacing: 8, Alignment: d.AlignHNearVCenter}, Children: []d.Widget{
+				heading("代理故障排查"),
+				d.HSpacer{},
+				d.PushButton{AssignTo: &ui.timeSettings, Text: "打开时间设置", UseLayoutFlags: true,
+					MinSize: d.Size{Width: 116, Height: 28}, OnClicked: ui.openTimeSettings},
+			}},
+			d.TextLabel{AssignTo: &ui.clockHint, NoPrefix: true, MinSize: d.Size{Width: 160}, TextColor: colors.ink},
+			d.TextLabel{Text: "若 Clash 等其他代理工具开启了 TUN（虚拟网卡），可在对应工具中关闭 TUN，再点「连接并测试」。",
+				NoPrefix: true, MinSize: d.Size{Width: 160}, TextColor: colors.ink},
+		},
+	}
+	proxy := d.Composite{
+		Background: colors.proxy, Layout: d.VBox{Margins: d.Margins{Left: 18, Top: 10, Right: 18, Bottom: 11}, Spacing: 4},
+		Children: []d.Widget{
+			d.Composite{Layout: d.HBox{MarginsZero: true, Spacing: 10, Alignment: d.AlignHNearVCenter}, Children: []d.Widget{
 				d.Label{AssignTo: &ui.proxyState, Font: uiFont(12, true), TextColor: colors.ink},
-				d.TextLabel{AssignTo: &ui.proxyHint, MinSize: d.Size{Width: 150}, TextColor: colors.muted},
+				d.HSpacer{},
+				d.ComboBox{AssignTo: &ui.proxyModes, CurrentIndex: 0, Model: []string{"系统代理", "TUN（虚拟网卡）"},
+					Accessibility: d.Accessibility{Name: "代理模式"}, MinSize: d.Size{Width: 145}, MaxSize: d.Size{Width: 145}},
+				d.PushButton{AssignTo: &ui.proxy, Text: "启用系统代理", MinSize: d.Size{Width: 110, Height: 32},
+					MaxSize: d.Size{Width: 110}, OnClicked: ui.toggleProxy},
 			}},
-			d.PushButton{AssignTo: &ui.proxy, Text: "启用系统代理", MinSize: d.Size{Width: 110, Height: 32}, MaxSize: d.Size{Width: 110}, OnClicked: func() {
-				on := !ui.state.Proxy
-				ui.runAction("正在更新系统代理…", "已更新 Windows 代理设置", func(context.Context) error { return ui.controller.SetProxy(on) })
-			}},
+			d.Label{AssignTo: &ui.proxyUpdatedAt, Font: uiFont(10, true), TextColor: colors.ink},
+			d.TextLabel{AssignTo: &ui.proxyHint, MinSize: d.Size{Width: 150}, TextColor: colors.muted},
 		},
 	}
 	body := d.Composite{Background: colors.page,
 		Layout:   d.VBox{Margins: d.Margins{Left: 16, Top: 12, Right: 16, Bottom: 12}, Spacing: 10, Alignment: d.AlignHNearVNear},
-		Children: []d.Widget{connection, checks, proxy, d.VSpacer{}},
+		Children: []d.Widget{connection, checks, troubleshooting, proxy, d.VSpacer{}},
 	}
 	footer := d.Composite{
 		Background: colors.card, Layout: d.HBox{Margins: d.Margins{Left: 20, Top: 8, Right: 16, Bottom: 8}, Spacing: 8},
@@ -168,4 +195,12 @@ func (ui *nativeWindow) renderChecks() {
 		row.detail.SetText(detail)
 		row.detail.SetToolTipText(detail)
 	}
+	result := ui.results["proxy"]
+	visibility := int32(win.SW_HIDE)
+	if result.Status == "failed" && result.Hint != "" {
+		ui.clockHint.SetText(result.Hint)
+		visibility = win.SW_SHOWNA
+	}
+	// Apply the panel's own visibility even when the main window is hidden in the tray.
+	win.ShowWindow(ui.troubleshooting.Handle(), visibility)
 }

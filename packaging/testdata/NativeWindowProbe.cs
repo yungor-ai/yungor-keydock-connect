@@ -26,6 +26,7 @@ public static class KeyDockWindowProbe {
     [DllImport("user32.dll")] private static extern bool ClientToScreen(IntPtr window,ref Point pt);
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] private static extern IntPtr GetParent(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern IntPtr GetDlgItem(IntPtr dialog,int controlId);
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] private static extern bool PrintWindow(IntPtr hwnd,IntPtr hdc,uint flags);
@@ -113,7 +114,8 @@ public static class KeyDockWindowProbe {
             bool hits=kind=="button" ? cls=="button" && Text(h)==caption && IsWindowEnabled(h)
                 : kind=="server" ? editable && (style & 36)==0
                 : kind=="key" ? editable && (style & 32)!=0
-                : kind=="label" && cls=="static" && IsWindowVisible(h) && Text(h)==caption;
+                : cls=="static" && IsWindowVisible(h) &&
+                    (kind=="label" && Text(h)==caption || kind=="label-prefix" && Text(h).StartsWith(caption,StringComparison.Ordinal));
             if(!hits)return true;
             found=h;return false;},IntPtr.Zero);
         return found;
@@ -166,6 +168,26 @@ public static class KeyDockWindowProbe {
     }
     public static void Enter(IntPtr h,string v){IntPtr result;if(h==IntPtr.Zero||WriteText(h,12,IntPtr.Zero,v,TimedFlags,2500,out result)==IntPtr.Zero||result==IntPtr.Zero)throw new Exception("Native edit control did not accept input");}
     public static void Click(IntPtr h){if(h==IntPtr.Zero)throw new Exception("Native button not available");IntPtr result;if(Send(h,0xF5,IntPtr.Zero,IntPtr.Zero,TimedFlags,4000,out result)==IntPtr.Zero)throw new TimeoutException("Native button did not respond");}
+    public static void ClickForModal(IntPtr h){
+        if(h==IntPtr.Zero || !Post(h,0xF5,IntPtr.Zero,IntPtr.Zero))throw new Exception("Could not open the native dialog");
+    }
+    public static bool SetDiagnosticFileName(IntPtr dialog,string path){
+        // The pre-filled name identifies the edit box independently of the
+        // Windows display language and the shell's file-name control ID.
+        IntPtr edit=IntPtr.Zero;
+        EnumChildWindows(dialog,(h,a)=>{
+            if(!Class(h).Equals("Edit",StringComparison.OrdinalIgnoreCase) || !Text(h).StartsWith("KeyDockConnect-diagnostics-",StringComparison.Ordinal))return true;
+            edit=h;
+            return false;
+        },IntPtr.Zero);
+        if(edit==IntPtr.Zero)return false;
+        Enter(edit,path);
+        return true;
+    }
+    public static void AcceptFileDialog(IntPtr dialog){
+        const int idOk=1;
+        if(!Post(dialog,0x111,(IntPtr)idOk,GetDlgItem(dialog,idOk)))throw new Exception("Could not accept the native file dialog");
+    }
     public static void HideViaClose(IntPtr h){Post(h,0x10,IntPtr.Zero,IntPtr.Zero);}
     public static void SelectTray(IntPtr sink){if(sink==IntPtr.Zero)throw new Exception("No native tray callback window");Post(sink,0x403,IntPtr.Zero,(IntPtr)0x400);}
     private static bool TrayRect(IntPtr sink,out Rect box){

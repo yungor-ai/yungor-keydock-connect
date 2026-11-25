@@ -20,6 +20,7 @@ import (
 )
 
 const profileLimit = 512 << 10
+const tunDeviceName = "KeyDockTun"
 
 // Decode only fields that KeyDock's SS2022 feed is allowed to control.
 // Credentials are passed to the core on stdin. They never enter logs or argv.
@@ -45,7 +46,38 @@ type routing struct {
 	Rules   []string     `yaml:"rules"`
 }
 
-func subscription(ctx context.Context, raw string, tlsConfig *tls.Config) ([]byte, error) {
+type tunSettings struct {
+	Enable              bool     `yaml:"enable"`
+	Device              string   `yaml:"device"`
+	Stack               string   `yaml:"stack"`
+	AutoRoute           bool     `yaml:"auto-route"`
+	AutoDetectInterface bool     `yaml:"auto-detect-interface"`
+	StrictRoute         bool     `yaml:"strict-route"`
+	DNSMode             string   `yaml:"dns-mode"`
+	DNSHijack           []string `yaml:"dns-hijack"`
+}
+
+type snifferSettings struct {
+	Enable              bool                    `yaml:"enable"`
+	ParsePureIP         bool                    `yaml:"parse-pure-ip"`
+	OverrideDestination bool                    `yaml:"override-destination"`
+	Sniff               map[string]snifferPorts `yaml:"sniff"`
+}
+
+type snifferPorts struct {
+	Ports []int `yaml:"ports"`
+}
+
+func (m *Manager) subscription(ctx context.Context, raw string, tlsConfig *tls.Config) (_ []byte, resultErr error) {
+	started := time.Now()
+	status := 0
+	var cause error
+	defer func() {
+		if cause == nil {
+			cause = resultErr
+		}
+		m.logHTTPStage("proxy.subscription", time.Since(started), cause, status, http.StatusOK)
+	}()
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
 		return nil, errors.New("订阅地址必须为有效的 HTTPS 地址")
@@ -61,17 +93,20 @@ func subscription(ctx context.Context, raw string, tlsConfig *tls.Config) ([]byt
 	}
 	resp, err := c.Do(req)
 	if err != nil {
+		cause = err
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
 		return nil, errors.New("无法连接订阅服务，请检查网络后重试")
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, errors.New("订阅服务返回 HTTP " + strconv.Itoa(resp.StatusCode))
+	status = resp.StatusCode
+	if status != http.StatusOK {
+		return nil, errors.New("订阅服务返回 HTTP " + strconv.Itoa(status))
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, profileLimit+1))
 	if err != nil || len(body) > profileLimit {
+		cause = err
 		return nil, errors.New("读取代理订阅失败或配置体积过大")
 	}
 	return body, nil
@@ -150,9 +185,22 @@ func validRule(rule string, names map[string]bool) bool {
 	}
 	return false
 }
-func buildProfile(body []byte, port int) ([]byte, error) { return buildRouting(body, port, false) }
+func buildProfile(body []byte, port int) ([]byte, error) {
+	return buildModeProfile(body, port, ModeSystem)
+}
+
+func buildModeProfile(body []byte, port int, mode Mode) ([]byte, error) {
+	return buildRoutingProfile(body, port, false, mode)
+}
 
 func buildRouting(body []byte, port int, diagnostic bool) ([]byte, error) {
+	return buildRoutingProfile(body, port, diagnostic, ModeSystem)
+}
+
+func buildRoutingProfile(body []byte, port int, diagnostic bool, mode Mode) ([]byte, error) {
+	if mode != ModeSystem && mode != ModeTUN {
+		return nil, errors.New("代理模式无效")
+	}
 	bad := errors.New("订阅不是受支持的 KeyDock SS2022 分流配置，请重新下载连接包")
 	if len(body) > profileLimit || port < 1 || port > 65535 {
 		return nil, bad
@@ -206,13 +254,32 @@ func buildRouting(body []byte, port int, diagnostic bool) ([]byte, error) {
 		cfg.Groups = nil
 		cfg.Rules = []string{"MATCH," + cfg.Proxies[0].Name}
 	}
-	return yaml.Marshal(struct {
-		Routing       routing `yaml:",inline"`
-		Port          int     `yaml:"mixed-port"`
-		Bind          string  `yaml:"bind-address"`
-		AllowLAN      bool    `yaml:"allow-lan"`
-		Mode          string  `yaml:"mode"`
-		Log           string  `yaml:"log-level"`
-		GeoAutoUpdate bool    `yaml:"geo-auto-update"`
-	}{Routing: cfg, Port: port, Bind: "127.0.0.1", Mode: "rule", Log: "silent"})
+	profile := struct {
+		Routing       routing          `yaml:",inline"`
+		Port          int              `yaml:"mixed-port"`
+		Bind          string           `yaml:"bind-address"`
+		AllowLAN      bool             `yaml:"allow-lan"`
+		Mode          string           `yaml:"mode"`
+		Log           string           `yaml:"log-level"`
+		GeoAutoUpdate bool             `yaml:"geo-auto-update"`
+		IPv6          bool             `yaml:"ipv6,omitempty"`
+		TUN           *tunSettings     `yaml:"tun,omitempty"`
+		Sniffer       *snifferSettings `yaml:"sniffer,omitempty"`
+	}{Routing: cfg, Port: port, Bind: "127.0.0.1", Mode: "rule", Log: "silent"}
+	if mode == ModeTUN {
+		// Mihomo checks for usable host IPv6 before adding the IPv6 TUN route.
+		profile.IPv6 = true
+		profile.TUN = &tunSettings{
+			Enable: true, Device: tunDeviceName, Stack: "mips", AutoRoute: true, AutoDetectInterface: true,
+			// Keep Windows DNS and more-specific LAN/VPN routes in place.
+			DNSMode: "disabled", DNSHijack: []string{}, StrictRoute: false,
+		}
+		// Use HTTP Host or TLS/QUIC SNI for domain rules without replacing the
+		// resolver's destination IP, which still drives the IP rules and dial.
+		profile.Sniffer = &snifferSettings{
+			Enable: true, ParsePureIP: true, OverrideDestination: false,
+			Sniff: map[string]snifferPorts{"HTTP": {Ports: []int{80}}, "TLS": {Ports: []int{443, 8443}}, "QUIC": {Ports: []int{443, 8443}}},
+		}
+	}
+	return yaml.Marshal(profile)
 }

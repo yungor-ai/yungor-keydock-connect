@@ -10,8 +10,6 @@ import (
 	"errors"
 	"io"
 	"net"
-	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,6 +36,12 @@ type child struct {
 	cmd     *exec.Cmd
 	done    chan struct{}
 	dataDir string
+	waitErr error // Set before done closes.
+	mode    Mode
+	port    int
+	profile []byte
+	tunLUID uint64
+	tunLock windows.Handle
 }
 
 func digestCopy(path string, out io.Writer, expected string) error {
@@ -46,11 +50,34 @@ func digestCopy(path string, out io.Writer, expected string) error {
 		return errors.New("缺少内置代理核心或离线分流数据，请重新安装")
 	}
 	defer f.Close()
+	return verifyDigest(f, out, expected)
+}
+
+func verifyDigest(source io.Reader, out io.Writer, expected string) error {
 	h := sha256.New()
-	if _, err = io.Copy(io.MultiWriter(out, h), f); err != nil || hex.EncodeToString(h.Sum(nil)) != expected {
+	if _, err := io.Copy(io.MultiWriter(out, h), source); err != nil || hex.EncodeToString(h.Sum(nil)) != expected {
 		return errors.New("代理组件校验失败，请重新安装")
 	}
 	return nil
+}
+
+func openVerifiedCore(path, expected string) (*os.File, error) {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, errors.New("内置代理核心路径无效，请重新安装")
+	}
+	// Windows allows other readers, including the loader, but prevents this
+	// file from being written, renamed or replaced while the handle is open.
+	handle, err := windows.CreateFile(name, windows.GENERIC_READ, windows.FILE_SHARE_READ, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_SEQUENTIAL_SCAN, 0)
+	if err != nil {
+		return nil, errors.New("无法锁定内置代理核心。请关闭更新程序后重试，或重新安装接入助手")
+	}
+	file := os.NewFile(uintptr(handle), path)
+	if err := verifyDigest(file, io.Discard, expected); err != nil {
+		file.Close()
+		return nil, err
+	}
+	return file, nil
 }
 
 func (m *Manager) dataDir() (string, error) {
@@ -125,17 +152,31 @@ func ownsListener(pid, port int) bool {
 	}
 	return false
 }
-func (m *Manager) launch(ctx context.Context, profile []byte, port int) (*child, error) {
-	if err := digestCopy(m.corePath, io.Discard, coreDigest); err != nil {
-		return nil, err
-	}
-	dir, err := m.dataDir()
+func (m *Manager) spawnCore(profile []byte, mode Mode, verifyConfig bool) (*child, error) {
+	started := time.Now()
+	core, err := openVerifiedCore(m.corePath, coreDigest)
+	m.logStage("proxy.core_integrity", started, err)
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.Command(m.corePath, "-d", dir, "-f", "-")
-	cmd.Dir = dir
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
+	defer core.Close()
+	started = time.Now()
+	dir, err := m.dataDir()
+	m.logStage("proxy.core_data", started, err)
+	if err != nil {
+		return nil, err
+	}
+	args := []string{"-d", dir, "-f", "-"}
+	if verifyConfig {
+		args = append(args, "-t")
+	}
+	cmd := exec.Command(m.corePath, args...)
+	cmd.Dir = filepath.Dir(m.corePath)
+	flags := uint32(windows.CREATE_NO_WINDOW)
+	if mode == ModeTUN {
+		flags = windows.CREATE_NEW_CONSOLE
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: flags}
 	cmd.Env = []string{}
 	for _, k := range []string{"SystemRoot", "WINDIR", "LOCALAPPDATA", "USERPROFILE", "TEMP", "TMP"} {
 		if v := os.Getenv(k); v != "" {
@@ -144,28 +185,48 @@ func (m *Manager) launch(ctx context.Context, profile []byte, port int) (*child,
 	}
 	// Keep stdin open until the job owns the process. No credentials are stored
 	// on the command line, in temporary files or in proxy logs.
+	started = time.Now()
 	in, err := cmd.StdinPipe()
 	if err != nil {
+		m.logStage("proxy.core_process", started, err)
 		os.RemoveAll(dir)
 		return nil, err
 	}
 	if err = cmd.Start(); err != nil {
+		m.logStage("proxy.core_process", started, err)
 		in.Close()
 		os.RemoveAll(dir)
 		return nil, errors.New("Windows 无法启动内置代理核心")
 	}
+	processElapsed := time.Since(started)
+	started = time.Now()
 	job, err := restrictJob(cmd)
+	jobElapsed := time.Since(started)
 	if err != nil {
 		cmd.Process.Kill()
 		in.Close()
 		cmd.Wait()
 		os.RemoveAll(dir)
+		m.diagnostics.Record("proxy.core_process", "ok", processElapsed, nil, 0)
+		m.diagnostics.Record("proxy.core_job", "failed", jobElapsed, err, 0)
 		return nil, errors.New("无法启用 Windows 代理进程保护")
 	}
-	p := &child{cmd: cmd, job: job, dataDir: dir, done: make(chan struct{})}
-	go func() { cmd.Wait(); close(p.done) }()
+	m.diagnostics.Record("proxy.core_process", "ok", processElapsed, nil, 0)
+	m.diagnostics.Record("proxy.core_job", "ok", jobElapsed, nil, 0)
+	p := &child{cmd: cmd, job: job, dataDir: dir, done: make(chan struct{}), mode: mode}
+	go func() { p.waitErr = cmd.Wait(); close(p.done) }()
 	// The pinned child reads stdin before loading the network stack.
 	go func() { in.Write(profile); in.Close() }()
+	return p, nil
+}
+
+func (m *Manager) launch(ctx context.Context, profile []byte, port int, mode Mode) (*child, error) {
+	p, err := m.spawnCore(profile, mode, false)
+	if err != nil {
+		return nil, err
+	}
+	p.port, p.profile = port, profile
+	started := time.Now()
 	deadline := time.NewTimer(12 * time.Second)
 	defer deadline.Stop()
 	ticker := time.NewTicker(100 * time.Millisecond)
@@ -173,43 +234,100 @@ func (m *Manager) launch(ctx context.Context, profile []byte, port int) (*child,
 	for {
 		select {
 		case <-ctx.Done():
-			p.close()
-			return nil, ctx.Err()
+			m.logStage("proxy.core_ready", started, ctx.Err())
+			return nil, errors.Join(ctx.Err(), m.closeChild(p))
 		case <-p.done:
-			p.close()
-			return nil, errors.New("代理核心未能加载订阅分流配置")
+			m.diagnostics.Record("proxy.core_ready", "failed", time.Since(started), p.waitErr, 0)
+			return nil, errors.Join(errors.New("代理核心未能加载订阅分流配置"), m.closeChild(p))
 		case <-deadline.C:
-			p.close()
-			return nil, errors.New("内置代理未能及时启动")
+			m.logStage("proxy.core_ready", started, context.DeadlineExceeded)
+			return nil, errors.Join(errors.New("内置代理未能及时启动"), m.closeChild(p))
 		case <-ticker.C:
-			if ownsListener(cmd.Process.Pid, port) {
+			if ownsListener(p.cmd.Process.Pid, port) {
+				m.logStage("proxy.core_ready", started, nil)
+				if mode == ModeTUN {
+					if err := m.awaitTUN(ctx, p); err != nil {
+						return nil, errors.Join(err, m.closeChild(p))
+					}
+				}
 				return p, nil
 			}
 		}
 	}
 }
 
-func (p *child) close() {
-	windows.CloseHandle(p.job)
-	<-p.done
-	os.RemoveAll(p.dataDir)
+func (m *Manager) closeChild(p *child) (resultErr error) {
+	if p.mode == ModeTUN {
+		defer func() {
+			if resultErr != nil {
+				m.pendingTUN = p
+				return
+			}
+			m.pendingTUN = nil
+			if p.tunLock != 0 {
+				_ = windows.CloseHandle(p.tunLock)
+				p.tunLock = 0
+			}
+		}()
+		select {
+		case <-p.done:
+		default:
+			p.requestTUNShutdown()
+		}
+	}
+	var exitErr error
+	if p.job != 0 {
+		exitErr = windows.CloseHandle(p.job)
+		if exitErr == nil {
+			p.job = 0
+		}
+	}
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-p.done:
+	case <-timer.C:
+		return errors.Join(exitErr, errors.New("代理核心未能及时退出"))
+	}
+	_ = os.RemoveAll(p.dataDir)
+	if p.mode != ModeTUN {
+		return exitErr
+	}
+	started := time.Now()
+	err := p.clearTUNRoutes()
+	m.logStage("proxy.tun_cleanup", started, err)
+	return errors.Join(exitErr, err)
 }
 
-func (m *Manager) Start(raw string) error {
+func (m *Manager) Start(raw string) error { return m.StartMode(raw, ModeSystem) }
+
+func (m *Manager) StartMode(raw string, mode Mode) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := m.CheckMode(mode); err != nil {
+		return err
+	}
 	if m.running != nil {
-		return nil
+		if m.running.mode == mode {
+			return nil
+		}
+		return errors.New("请先关闭当前代理，再切换代理模式")
+	}
+	if m.pendingTUN != nil {
+		if err := m.closeChild(m.pendingTUN); err != nil {
+			return err
+		}
 	}
 	if err := m.recoverLocked(); err != nil {
 		return err
 	}
 	m.pruneRuntime()
-	body, err := subscription(context.Background(), raw, nil)
+	ctx := context.Background()
+	body, err := m.subscription(ctx, raw, nil)
 	if err != nil {
 		return err
 	}
-	return m.startProfileLocked(body)
+	return m.startSubscriptionLocked(ctx, body, mode)
 }
 
 func loopbackPort() (int, error) {
@@ -222,26 +340,98 @@ func loopbackPort() (int, error) {
 }
 
 func (m *Manager) startProfileLocked(body []byte) error {
+	return m.startSubscriptionLocked(context.Background(), body, ModeSystem)
+}
+
+func (m *Manager) startSubscriptionLocked(ctx context.Context, body []byte, mode Mode) error {
+	started := time.Now()
 	port, err := loopbackPort()
+	m.logStage("proxy.local_port", started, err)
 	if err != nil {
 		return err
 	}
-	cfg, err := buildProfile(body, port)
+	started = time.Now()
+	cfg, err := buildModeProfile(body, port, mode)
+	m.logStage("proxy.profile", started, err)
 	if err != nil {
 		return err
 	}
-	p, err := m.launch(context.Background(), cfg, port)
+	return m.startModeProfileLocked(ctx, cfg, port, mode)
+}
+
+func (m *Manager) startModeProfileLocked(ctx context.Context, cfg []byte, port int, mode Mode) error {
+	if mode == ModeTUN {
+		lock, err := reserveTUN()
+		if err != nil {
+			return err
+		}
+		if err = m.startTUNLocked(ctx, cfg, port, lock); err != nil && m.pendingTUN == nil {
+			_ = windows.CloseHandle(lock)
+		}
+		return err
+	}
+	p, err := m.launch(ctx, cfg, port, mode)
 	if err != nil {
 		return err
 	}
+	started := time.Now()
+	err = m.applySystemProxy(port)
+	m.logStage("proxy.settings_apply", started, err)
+	if err != nil {
+		return errors.Join(err, m.recoverLocked(), m.closeChild(p))
+	}
+	m.watchChild(p)
+	return nil
+}
+
+func (m *Manager) startTUNLocked(ctx context.Context, cfg []byte, port int, lock windows.Handle) error {
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		return errors.New("启动 TUN 需要管理员权限")
+	}
+	if err := checkTUNStart(); err != nil {
+		return err
+	}
+	p, err := m.launch(ctx, cfg, port, ModeTUN)
+	if err != nil {
+		if m.pendingTUN != nil {
+			m.pendingTUN.tunLock = lock
+		}
+		return err
+	}
+	p.tunLock = lock
+	m.watchChild(p)
+	return nil
+}
+
+func (m *Manager) watchChild(p *child) {
+	m.running = p
+	m.active.Store(p)
+	activeSince := time.Now()
+	go func() {
+		<-p.done
+		lifetime := time.Since(activeSince)
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.running != p {
+			return
+		}
+		m.diagnostics.Record("proxy.worker_exit", "failed", lifetime, p.waitErr, 0)
+		if p.mode == ModeSystem {
+			_ = m.recoverLocked()
+		}
+		m.running = nil
+		_ = m.closeChild(p)
+		m.active.Store(nil)
+	}()
+}
+
+func (m *Manager) applySystemProxy(port int) error {
 	original, err := currentSettings()
 	if err != nil {
-		p.close()
 		return err
 	}
 	next := settings{Flags: 3, Server: "127.0.0.1:" + strconv.Itoa(port), Bypass: "<local>;localhost;127.*;[::1]"}
 	if err = m.record(ownership{Prior: original, Owned: next}); err != nil {
-		p.close()
 		return err
 	}
 	if err = applySettings(next); err == nil {
@@ -251,36 +441,144 @@ func (m *Manager) startProfileLocked(body []byte) error {
 			err = errors.New("Windows 策略阻止了代理设置")
 		}
 	}
-	if err != nil {
-		restoreErr := m.recoverLocked()
-		p.close()
-		return errors.Join(err, restoreErr)
-	}
-	m.running = p
-	go func() {
-		<-p.done
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		if m.running != p {
-			return
-		}
-		// Stop() or Recover() retries a failed restoration using the journal.
-		_ = m.recoverLocked()
-		m.running = nil
-		p.close()
-	}()
-	return nil
+	return err
 }
+
 func (m *Manager) Stop() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	err := m.recoverLocked()
-	if m.running != nil {
-		p := m.running
-		m.running = nil
-		p.close()
+	return m.stopLocked()
+}
+
+func (m *Manager) stopLocked() error {
+	if m.pendingTUN != nil {
+		if err := m.closeChild(m.pendingTUN); err != nil {
+			return err
+		}
 	}
+	p := m.running
+	if p == nil || p.mode == ModeSystem {
+		if err := m.recoverLocked(); err != nil {
+			return err
+		}
+	}
+	if p == nil {
+		return nil
+	}
+	m.running = nil
+	err := m.closeChild(p)
+	m.active.Store(nil)
 	return err
+}
+
+func (m *Manager) Refresh(ctx context.Context, raw string) error {
+	return m.refresh(ctx, raw, nil)
+}
+
+func (m *Manager) refresh(ctx context.Context, raw string, tlsConfig *tls.Config) (resultErr error) {
+	started := time.Now()
+	defer func() { m.logStage("proxy.refresh", started, resultErr) }()
+	m.mu.Lock()
+	prior := m.running
+	m.mu.Unlock()
+	if prior == nil {
+		return errors.New("代理已关闭，此次未更新订阅")
+	}
+	body, err := m.subscription(ctx, raw, tlsConfig)
+	if err != nil {
+		return err
+	}
+	cfg, err := buildModeProfile(body, prior.port, prior.mode)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.running != prior {
+		return errors.New("代理状态已变化，请重试刷新")
+	}
+	if bytes.Equal(prior.profile, cfg) {
+		return nil
+	}
+	if err = m.validateProfile(ctx, cfg); err != nil {
+		return err
+	}
+	if err = ctx.Err(); err != nil {
+		return err
+	}
+	return m.replaceProfileLocked(ctx, prior, cfg)
+}
+
+func (m *Manager) replaceProfileLocked(ctx context.Context, prior *child, cfg []byte) error {
+	// Keep this process's TUN reservation across stop, start and rollback.
+	lock := prior.tunLock
+	prior.tunLock = 0
+	if lock != 0 {
+		defer func() {
+			if m.pendingTUN != nil {
+				m.pendingTUN.tunLock = lock
+			} else if m.running == nil {
+				_ = windows.CloseHandle(lock)
+			}
+		}()
+	}
+	// The Windows proxy retains the same port during reload. Reuse its
+	// ownership journal and leave even concurrent user settings untouched.
+	m.running = nil
+	defer func() {
+		if m.running == nil {
+			m.active.Store(nil)
+		}
+	}()
+	if err := m.closeChild(prior); err != nil {
+		if prior.mode == ModeSystem {
+			return errors.Join(err, m.recoverLocked())
+		}
+		return err
+	}
+	start := func(ctx context.Context, conf []byte) error {
+		if prior.mode == ModeTUN {
+			return m.startTUNLocked(ctx, conf, prior.port, lock)
+		}
+		p, err := m.launch(ctx, conf, prior.port, ModeSystem)
+		if err != nil {
+			return err
+		}
+		m.watchChild(p)
+		return nil
+	}
+	if err := start(ctx, cfg); err != nil {
+		if m.pendingTUN != nil {
+			return errors.Join(err, errors.New("新 TUN 路由恢复后才能重新启用旧代理配置"))
+		}
+		rollback := start(context.Background(), prior.profile)
+		if rollback != nil {
+			if prior.mode == ModeSystem {
+				rollback = errors.Join(rollback, m.recoverLocked())
+			}
+			return errors.Join(err, errors.New("旧代理配置恢复失败"), rollback)
+		}
+		return errors.Join(errors.New("已恢复旧代理配置"), err)
+	}
+	return nil
+}
+
+func (m *Manager) validateProfile(ctx context.Context, profile []byte) error {
+	p, err := m.spawnCore(profile, ModeSystem, true)
+	if err != nil {
+		return err
+	}
+	validateCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	select {
+	case <-p.done:
+		if p.waitErr != nil {
+			err = errors.New("内置代理无法加载更新后的订阅配置")
+		}
+	case <-validateCtx.Done():
+		err = validateCtx.Err()
+	}
+	return errors.Join(err, m.closeChild(p))
 }
 
 func (m *Manager) pruneRuntime() {
@@ -308,7 +606,7 @@ func (m *Manager) Test(ctx context.Context, subscriptionURL string) error {
 func (m *Manager) testConnection(ctx context.Context, subscriptionURL, target string, tlsConfig *tls.Config) error {
 	ctx, cancel := context.WithTimeout(ctx, 35*time.Second)
 	defer cancel()
-	body, err := subscription(ctx, subscriptionURL, tlsConfig)
+	body, err := m.subscription(ctx, subscriptionURL, tlsConfig)
 	if err != nil {
 		return err
 	}
@@ -318,37 +616,22 @@ func (m *Manager) testConnection(ctx context.Context, subscriptionURL, target st
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	started := time.Now()
 	port, err := loopbackPort()
+	m.logStage("proxy.local_port", started, err)
 	if err != nil {
 		return err
 	}
+	started = time.Now()
 	data, err := buildRouting(body, port, true)
+	m.logStage("proxy.profile", started, err)
 	if err != nil {
 		return err
 	}
-	p, err := m.launch(ctx, data, port)
+	p, err := m.launch(ctx, data, port, ModeSystem)
 	if err != nil {
 		return err
 	}
-	defer p.close()
-	local := &url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(port))}
-	tr := &http.Transport{Proxy: http.ProxyURL(local), TLSClientConfig: tlsConfig, DisableKeepAlives: true, TLSHandshakeTimeout: 8 * time.Second}
-	defer tr.CloseIdleConnections()
-	c := http.Client{Transport: tr, Timeout: 12 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
-	if err != nil {
-		return errors.New("代理检查地址无效")
-	}
-	resp, err := c.Do(req)
-	if err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		return errors.New("SS2022 代理未能连接到 HTTPS 测试服务")
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		return errors.New("代理测试服务未返回预期的 204 响应")
-	}
-	return nil
+	defer m.closeChild(p)
+	return m.checkHTTPS(ctx, port, target, tlsConfig)
 }

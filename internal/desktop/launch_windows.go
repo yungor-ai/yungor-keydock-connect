@@ -8,9 +8,14 @@ import (
 	"os/exec"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/windows"
 )
 
 func launchCodex() error {
+	if windows.GetCurrentProcessToken().IsElevated() {
+		return errors.New("接入助手当前以管理员身份运行。请在同一 Windows 用户下，从开始菜单正常打开 Codex")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	// Resolve the registered Start menu entry so Microsoft Store upgrades do not invalidate a path.

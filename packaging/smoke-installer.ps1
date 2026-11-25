@@ -136,7 +136,8 @@ try {
     }
     $null = Wait-For 'initial connection status' {
         [KeyDockWindowProbe]::CheckStatus($handle,'设备授权','待检查',$null) -and
-        [KeyDockWindowProbe]::Child($handle,'label','系统代理未启用') -ne [IntPtr]::Zero
+        [KeyDockWindowProbe]::Child($handle,'label','系统代理未启用') -ne [IntPtr]::Zero -and
+        [KeyDockWindowProbe]::Child($handle,'label-prefix','最近更新时间 ') -eq [IntPtr]::Zero
     }
     [KeyDockWindowProbe]::Capture($handle,(Join-Path $shots '01-first-launch.png'),'设备接入')
     [KeyDockWindowProbe]::Enter($serverField,$origin)
@@ -147,6 +148,28 @@ try {
         [KeyDockWindowProbe]::CheckStatus($handle,'设备授权','失败','401') -and $retry -ne [IntPtr]::Zero
     }
     [KeyDockWindowProbe]::Capture($handle,(Join-Path $shots '02-device-key-error.png'),'设备接入')
+    $diagnosticsPath = Join-Path $testRoot 'connection-diagnostics.json'
+    [KeyDockWindowProbe]::ClickForModal([KeyDockWindowProbe]::Child($handle,'button','导出诊断日志'))
+    $saveDialog = Wait-For 'native diagnostics save dialog' {
+        $h = [KeyDockWindowProbe]::Window($process.Id,'#32770','导出诊断日志')
+        if ($h -ne [IntPtr]::Zero -and [KeyDockWindowProbe]::IsWindowVisible($h)) { $h }
+    }
+    $null = Wait-For 'diagnostics filename field' { [KeyDockWindowProbe]::SetDiagnosticFileName($saveDialog,$diagnosticsPath) }
+    [KeyDockWindowProbe]::AcceptFileDialog($saveDialog)
+    $null = Wait-For 'diagnostic file and restored controls' {
+        (Test-Path -LiteralPath $diagnosticsPath) -and [KeyDockWindowProbe]::Child($handle,'button','连接并测试') -ne [IntPtr]::Zero
+    }
+    $diagnosticJSON = Get-Content -Raw -Encoding UTF8 -LiteralPath $diagnosticsPath
+    $diagnostics = $diagnosticJSON | ConvertFrom-Json
+    $rejectedAccess = @($diagnostics.events | Where-Object {
+        $_.stage -eq 'device' -and $_.outcome -eq 'failed' -and $_.http_status -eq 401
+    })
+    if ($diagnostics.schema_version -ne 1 -or $diagnostics.app_version -ne $version -or $rejectedAccess.Count -eq 0) {
+        throw 'The diagnostic export did not include the rejected device check.'
+    }
+    if ($diagnosticJSON.Contains('intentionally-wrong-synthetic-key') -or $diagnosticJSON.Contains($origin.Trim())) {
+        throw 'The diagnostic export contains the raw device key or gateway origin.'
+    }
     [KeyDockWindowProbe]::Enter($keyField,'fixture-device-key')
     [KeyDockWindowProbe]::Click($startButton)
     $null = Wait-For 'four native connection checks' {
@@ -162,21 +185,45 @@ try {
     [KeyDockWindowProbe]::AssertAlignedChecks($handle)
 
     # Give the same paired device a loopback SS2022 node. Resync with the
-    # saved Device Key and exercise the two system-proxy actions from the UI.
+    # saved Device Key and simulate clock drift without changing Windows time.
+    $null = New-Item -ItemType File -Path (Join-Path $testRoot 'subscription-enabled')
+    $skewMarker = Join-Path $testRoot 'proxy-clock-skew-failure'
+    $null = New-Item -ItemType File -Path $skewMarker
+    $clockHint = '检测到本机时钟比 KeyDock 服务端慢了 30 秒以上。请在 Windows 时间设置中点「立即同步」，再复测。'
+    $tunHint = '若 Clash 等其他代理工具开启了 TUN（虚拟网卡），可在对应工具中关闭 TUN，再点「连接并测试」。'
+    try {
+        [KeyDockWindowProbe]::Click($startButton)
+        $null = Wait-For 'visible clock and TUN guidance after a proxy failure' {
+            $timeSettings = [KeyDockWindowProbe]::Child($handle,'button','打开时间设置')
+            [KeyDockWindowProbe]::CheckStatus($handle,'设备授权','完成','演示工作站') -and
+            [KeyDockWindowProbe]::CheckStatus($handle,'Codex 配置','完成','synthetic-model') -and
+            [KeyDockWindowProbe]::CheckStatus($handle,'模型连通','完成',$null) -and
+            [KeyDockWindowProbe]::CheckStatus($handle,'代理连通','失败','HTTP 503') -and
+            [KeyDockWindowProbe]::Child($handle,'label',$clockHint) -ne [IntPtr]::Zero -and
+            [KeyDockWindowProbe]::Child($handle,'label',$tunHint) -ne [IntPtr]::Zero -and
+            [KeyDockWindowProbe]::IsWindowVisible($timeSettings)
+        }
+        [KeyDockWindowProbe]::Capture($handle,(Join-Path $shots '06-proxy-troubleshooting.png'),'代理故障排查')
+    } finally {
+        Remove-Item -LiteralPath $skewMarker
+    }
+
+    # Restore the normal subscription and exercise the system-proxy actions.
     $peer = Start-Process (Join-Path $installDir 'core\mihomo.exe') -ArgumentList ('-d "{0}" -f "{1}"' -f $testRoot,$ssConfig) -PassThru
     $null = Wait-For 'local SS2022 fixture listener' {
         if ($peer.HasExited) { throw 'Loopback SS peer exited early.' }
         $client = [Net.Sockets.TcpClient]::new()
         try { $client.Connect('127.0.0.1',$ssPort); $true } catch { $false } finally { $client.Dispose() }
     }
-    $null = New-Item -ItemType File -Path (Join-Path $testRoot 'subscription-enabled')
     [KeyDockWindowProbe]::Click($startButton)
     $null = Wait-For 'assigned SS subscription tested without enabling Windows proxy' {
         $canEnable = [KeyDockWindowProbe]::Child($handle,'button','启用系统代理')
         $off = [KeyDockWindowProbe]::Child($handle,'label','系统代理未启用')
         $done = [KeyDockWindowProbe]::CheckStatus($handle,'代理连通','完成',$null)
         $offline = [KeyDockWindowProbe]::CheckStatus($handle,'代理连通','失败',$null)
-        ($done -or $offline) -and $canEnable -ne [IntPtr]::Zero -and $off -ne [IntPtr]::Zero
+        ($done -or $offline) -and $canEnable -ne [IntPtr]::Zero -and $off -ne [IntPtr]::Zero -and
+        [KeyDockWindowProbe]::Child($handle,'label',$clockHint) -eq [IntPtr]::Zero -and
+        [KeyDockWindowProbe]::Child($handle,'label','最近更新时间 尚未更新') -ne [IntPtr]::Zero
     } 55
     Trace-Smoke ("Public 204 probe through local SS peer succeeded: " + [KeyDockWindowProbe]::CheckStatus($handle,'代理连通','完成',$null))
     $managed = [IO.File]::ReadAllBytes($config)
@@ -192,6 +239,11 @@ try {
         $button = [KeyDockWindowProbe]::Child($handle,'button','关闭系统代理')
         if ($button -ne [IntPtr]::Zero -and [KeyDockWindowProbe]::Child($handle,'label','系统代理已启用') -ne [IntPtr]::Zero) { $button }
     }
+    $updatedAt = [KeyDockWindowProbe]::Text([KeyDockWindowProbe]::Child($handle,'label-prefix','最近更新时间 '))
+    if ($updatedAt -notmatch '^最近更新时间 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$') {
+        throw 'The proxy card does not display a full subscription update timestamp.'
+    }
+    [KeyDockWindowProbe]::AssertReadableLabel($handle,$updatedAt)
     $inet = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
     if ($inet.ProxyEnable -ne 1 -or $inet.ProxyServer -notmatch '^127\.0\.0\.1:[0-9]+$') { throw 'UI proxy status does not match Windows Internet Settings.' }
     # The ephemeral fixture CA has no revocation service. Schannel still
@@ -202,7 +254,8 @@ try {
     [KeyDockWindowProbe]::Click($turnOff)
     $null = Wait-For 'disabled system proxy' {
         [KeyDockWindowProbe]::Child($handle,'button','启用系统代理') -ne [IntPtr]::Zero -and
-        [KeyDockWindowProbe]::Child($handle,'label','系统代理未启用') -ne [IntPtr]::Zero
+        [KeyDockWindowProbe]::Child($handle,'label','系统代理未启用') -ne [IntPtr]::Zero -and
+        [KeyDockWindowProbe]::Child($handle,'label',$updatedAt) -ne [IntPtr]::Zero
     }
     Trace-Smoke 'Checking installed DPAPI credential helper'
     $info = New-Object Diagnostics.ProcessStartInfo

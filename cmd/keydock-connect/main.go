@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/yungor-ai/yungor-keydock-connect/internal/codex"
 	"github.com/yungor-ai/yungor-keydock-connect/internal/desktop"
+	"github.com/yungor-ai/yungor-keydock-connect/internal/diagnostics"
 	"github.com/yungor-ai/yungor-keydock-connect/internal/proxy"
 )
 
@@ -77,7 +79,16 @@ func run(args []string) error {
 		return err
 	}
 	mgr := proxy.New(stateDir, filepath.Join(filepath.Dir(exe), "core", "mihomo.exe"))
-	if err = mgr.Recover(); err != nil {
+	var log *diagnostics.Log
+	if !uninstall {
+		log = diagnostics.New(stateDir)
+		mgr.SetDiagnostics(log)
+		log.Record("app.start", "ok", 0, nil, 0)
+	}
+	start := time.Now()
+	err = mgr.Recover()
+	log.RecordResult("proxy.recover", start, err)
+	if err != nil {
 		return err
 	}
 	if uninstall {
@@ -89,9 +100,15 @@ func run(args []string) error {
 		}
 		return nil
 	}
-	controller, err := desktop.NewController(home, stateDir, mgr, desktop.SystemBackend())
+	start = time.Now()
+	controller, err := desktop.NewController(home, stateDir, mgr, desktop.SystemBackend(), log)
+	log.RecordResult("app.enrollment_load", start, err)
 	if err != nil {
 		return err
 	}
-	return runWindow(stateDir, controller)
+	err = runWindow(stateDir, controller)
+	if err != nil {
+		log.Record("app.window", "failed", 0, err, 0)
+	}
+	return err
 }

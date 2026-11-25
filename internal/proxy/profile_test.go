@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -82,6 +83,68 @@ func TestRejectsInvalidFeedWithoutLeakingContents(t *testing.T) {
 		}
 	}
 }
+
+func TestTUNProfilePreservesRoutingAndUsesTrustedRuntimeSettings(t *testing.T) {
+	source := []byte(fixture + `tun: {enable: false, device: "untrusted-device", strict-route: true, dns-hijack: ["any:53"]}
+dns: {enable: true, nameserver: ["https://untrusted.invalid/dns-query"]}
+sniffer: {enable: false, override-destination: true}
+ipv6: false
+interface-name: untrusted-interface
+external-controller: 0.0.0.0:9999
+allow-lan: true
+`)
+	baseline, err := buildModeProfile(source, 23456, ModeSystem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tunnel, err := buildModeProfile(source, 23456, ModeTUN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var system, tun map[string]any
+	if err := yaml.Unmarshal(baseline, &system); err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal(tunnel, &tun); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"dns", "interface-name", "external-controller"} {
+		if _, found := tun[key]; found {
+			t.Fatalf("feed runtime setting %q survived sanitization", key)
+		}
+	}
+	if tun["ipv6"] != true {
+		t.Fatal("TUN disabled host IPv6 support")
+	}
+	wantTUN := map[string]any{
+		"enable": true, "device": "KeyDockTun", "stack": "mips", "auto-route": true,
+		"auto-detect-interface": true, "strict-route": false, "dns-mode": "disabled", "dns-hijack": []any{},
+	}
+	if !reflect.DeepEqual(tun["tun"], wantTUN) {
+		t.Fatalf("unexpected TUN settings: %v", tun["tun"])
+	}
+	wantSniffer := map[string]any{
+		"enable": true, "parse-pure-ip": true, "override-destination": false,
+		"sniff": map[string]any{
+			"HTTP": map[string]any{"ports": []any{80}},
+			"TLS":  map[string]any{"ports": []any{443, 8443}},
+			"QUIC": map[string]any{"ports": []any{443, 8443}},
+		},
+	}
+	if !reflect.DeepEqual(tun["sniffer"], wantSniffer) {
+		t.Fatalf("unexpected domain sniffing settings: %v", tun["sniffer"])
+	}
+	delete(tun, "tun")
+	delete(tun, "sniffer")
+	delete(tun, "ipv6")
+	if !reflect.DeepEqual(tun, system) {
+		t.Fatal("TUN changed subscription routing or exposed the loopback listener")
+	}
+	if _, err := buildModeProfile([]byte(fixture), 23456, Mode("other")); err == nil {
+		t.Fatal("unknown proxy mode accepted")
+	}
+}
+
 func TestPriorSettingsOwnership(t *testing.T) {
 	j := ownership{Prior: settings{Flags: 9, Server: "example:1234", Bypass: "old"}, Owned: settings{Flags: 3, Server: "127.0.0.1:32768", Bypass: "<local>"}}
 	restored, ok := j.restore(j.Owned)
@@ -115,14 +178,18 @@ func TestRealCoreAcceptsFilteredKeyDockConfig(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	raw, err := buildProfile([]byte(fixture), 29901)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command(core, "-t", "-d", dir, "-f", "-")
-	cmd.Stdin = bytes.NewReader(raw)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("synthetic config rejected: %v %s", err, output)
+	for _, mode := range []Mode{ModeSystem, ModeTUN} {
+		t.Run(string(mode), func(t *testing.T) {
+			raw, err := buildModeProfile([]byte(fixture), 29901, mode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(core, "-t", "-d", dir, "-f", "-")
+			cmd.Stdin = bytes.NewReader(raw)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("synthetic config rejected: %v %s", err, output)
+			}
+		})
 	}
 }
 
