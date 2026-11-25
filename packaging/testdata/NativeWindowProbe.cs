@@ -25,8 +25,10 @@ public static class KeyDockWindowProbe {
     [DllImport("user32.dll")] private static extern bool GetClientRect(IntPtr window,out Rect value);
     [DllImport("user32.dll")] private static extern bool ClientToScreen(IntPtr window,ref Point pt);
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr hwnd,uint command);
     [DllImport("user32.dll")] private static extern IntPtr GetParent(IntPtr hwnd);
-    [DllImport("user32.dll")] private static extern IntPtr GetDlgItem(IntPtr dialog,int controlId);
+    [DllImport("user32.dll")] private static extern int GetDlgCtrlID(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] private static extern bool PrintWindow(IntPtr hwnd,IntPtr hdc,uint flags);
@@ -182,11 +184,49 @@ public static class KeyDockWindowProbe {
         },IntPtr.Zero);
         if(edit==IntPtr.Zero)return false;
         Enter(edit,path);
+        if(Text(edit)!=path)throw new Exception("The native filename edit did not retain the supplied path.");
         return true;
     }
-    public static void AcceptFileDialog(IntPtr dialog){
+    public static string AcceptFileDialog(IntPtr owner,IntPtr dialog){
+        const uint gwOwner=4,bmClick=0xF5;
         const int idOk=1;
-        if(!Post(dialog,0x111,(IntPtr)idOk,GetDlgItem(dialog,idOk)))throw new Exception("Could not accept the native file dialog");
+        if(dialog==IntPtr.Zero || GetWindow(dialog,gwOwner)!=owner || !IsWindowVisible(dialog))
+            throw new Exception("The native file dialog is not visible and owned by the setup window.");
+        IntPtr save=IntPtr.Zero;
+        EnumChildWindows(dialog,(h,a)=>{
+            if(GetDlgCtrlID(h)!=idOk || !Class(h).Equals("Button",StringComparison.OrdinalIgnoreCase) ||
+                !IsWindowVisible(h) || !IsWindowEnabled(h))return true;
+            save=h;
+            return false;
+        },IntPtr.Zero);
+        if(save==IntPtr.Zero)throw new Exception("The native file dialog has no enabled Save button (IDOK).");
+        string title=Caption(dialog),label=Text(save);
+        if(GetForegroundWindow()!=dialog)SetForegroundWindow(dialog);
+        string action="button message";
+        var priorDpi=SetThreadDpiAwarenessContext((IntPtr)(-4));
+        try{
+            Rect r;
+            if(GetForegroundWindow()==dialog && GetWindowRect(save,out r)){
+                var pt=new Point((r.left+r.right)/2,(r.top+r.bottom)/2);
+                if(WindowFromPoint(pt)==save && MouseClick(pt,false))action="physical click";
+            }
+        }finally{
+            if(priorDpi!=IntPtr.Zero)SetThreadDpiAwarenessContext(priorDpi);
+        }
+        if(action=="button message" && !Post(save,bmClick,IntPtr.Zero,IntPtr.Zero))
+            throw new Exception("Could not activate the native Save button.");
+        return String.Format("Accepted owned dialog \"{0}\" using Save control ID {1} (\"{2}\") by {3}",title,idOk,label,action);
+    }
+    public static string VisibleDialogs(int process){
+        var info=new StringBuilder();
+        EnumWindows((h,a)=>{
+            uint pid;
+            GetWindowThreadProcessId(h,out pid);
+            if(pid==process && Class(h)=="#32770" && IsWindowVisible(h))
+                info.AppendFormat(" [{0} title=\"{1}\"]",Describe(h),Caption(h));
+            return true;
+        },IntPtr.Zero);
+        return "Visible native dialogs:"+(info.Length==0?" none":info.ToString());
     }
     public static void HideViaClose(IntPtr h){Post(h,0x10,IntPtr.Zero,IntPtr.Zero);}
     public static void SelectTray(IntPtr sink){if(sink==IntPtr.Zero)throw new Exception("No native tray callback window");Post(sink,0x403,IntPtr.Zero,(IntPtr)0x400);}

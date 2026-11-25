@@ -156,9 +156,18 @@ try {
         if ($h -ne [IntPtr]::Zero -and [KeyDockWindowProbe]::IsWindowVisible($h)) { $h }
     }
     $null = Wait-For 'diagnostics filename field' { [KeyDockWindowProbe]::SetDiagnosticFileName($saveDialog,$diagnosticsPath) }
-    [KeyDockWindowProbe]::AcceptFileDialog($saveDialog)
-    $null = Wait-For 'diagnostic file and restored controls' {
-        (Test-Path -LiteralPath $diagnosticsPath) -and [KeyDockWindowProbe]::Child($handle,'button','连接并测试') -ne [IntPtr]::Zero
+    try {
+        Trace-Smoke ([KeyDockWindowProbe]::AcceptFileDialog($handle,$saveDialog))
+        $null = Wait-For 'closed diagnostics save dialog' { -not [KeyDockWindowProbe]::IsWindowVisible($saveDialog) }
+        $null = Wait-For 'diagnostic file and restored controls' {
+            (Test-Path -LiteralPath $diagnosticsPath) -and [KeyDockWindowProbe]::Child($handle,'button','连接并测试') -ne [IntPtr]::Zero
+        }
+    } catch {
+        Trace-Smoke ([KeyDockWindowProbe]::VisibleDialogs($process.Id))
+        $saveFailed = [KeyDockWindowProbe]::Child($handle,'label-prefix','无法保存诊断日志') -ne [IntPtr]::Zero
+        $saveReported = [KeyDockWindowProbe]::Child($handle,'label-prefix','诊断日志已保存') -ne [IntPtr]::Zero
+        Trace-Smoke "Diagnostic export evidence: expected file exists=$(Test-Path -LiteralPath $diagnosticsPath), save failed=$saveFailed, save reported=$saveReported"
+        throw
     }
     $diagnosticJSON = Get-Content -Raw -Encoding UTF8 -LiteralPath $diagnosticsPath
     $diagnostics = $diagnosticJSON | ConvertFrom-Json
