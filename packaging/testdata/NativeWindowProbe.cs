@@ -42,6 +42,7 @@ public static class KeyDockWindowProbe {
     [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(Point point);
     [DllImport("user32.dll")] private static extern bool SetCursorPos(int x,int y);
     [DllImport("user32.dll")] private static extern void mouse_event(uint flags,uint dx,uint dy,uint data,UIntPtr extra);
+    [DllImport("user32.dll",SetLastError=true)] private static extern uint SendInput(uint count,Input[] inputs,int size);
     [DllImport("user32.dll")] private static extern bool GetMenuItemRect(IntPtr hwnd,IntPtr menu,uint item,out Rect rect);
     [DllImport("user32.dll")] private static extern bool AllowSetForegroundWindow(uint process);
     [DllImport("user32.dll")] private static extern IntPtr GetShellWindow();
@@ -96,6 +97,17 @@ public static class KeyDockWindowProbe {
     }
     [StructLayout(LayoutKind.Sequential)] private struct TrayItem {public uint size; public IntPtr window; public uint id; public Guid guid;}
     [StructLayout(LayoutKind.Sequential)] private struct Rect {public int left,top,right,bottom;}
+    [StructLayout(LayoutKind.Sequential)] private struct Input {public uint type;public InputData data;}
+    [StructLayout(LayoutKind.Explicit)] private struct InputData {
+        [FieldOffset(0)] public MouseInput mouse; // Supplies the native INPUT union size.
+        [FieldOffset(0)] public KeyboardInput keyboard;
+    }
+    [StructLayout(LayoutKind.Sequential)] private struct MouseInput {
+        public int x,y;public uint data,flags,time;public UIntPtr extra;
+    }
+    [StructLayout(LayoutKind.Sequential)] private struct KeyboardInput {
+        public ushort key,scan;public uint flags,time;public UIntPtr extra;
+    }
     private static string Class(IntPtr h){var s=new StringBuilder(128);GetClassName(h,s,s.Capacity);return s.ToString();}
     public static string Text(IntPtr h){
         var s=new StringBuilder(8192);IntPtr result;
@@ -183,9 +195,39 @@ public static class KeyDockWindowProbe {
             return false;
         },IntPtr.Zero);
         if(edit==IntPtr.Zero)return false;
-        Enter(edit,path);
-        if(Text(edit)!=path)throw new Exception("The native filename edit did not retain the supplied path.");
-        return true;
+        if(GetForegroundWindow()!=dialog)SetForegroundWindow(dialog);
+        if(GetForegroundWindow()!=dialog)return false;
+        uint process;
+        var thread=GetWindowThreadProcessId(dialog,out process);
+        var gui=new GuiInfo{size=(uint)Marshal.SizeOf(typeof(GuiInfo))};
+        if(!GetGUIThreadInfo(thread,ref gui) || gui.focus!=edit){
+            ClickVisibleControl(edit);
+            return false;
+        }
+
+        // The shell caches filename changes internally. Use actual keyboard
+        // input to reach that code path instead of replacing HWND text.
+        const uint keyUp=2,unicode=4;
+        var input=new Input[4+2*path.Length];
+        input[0]=KeyInput(0x11,0,0); // Ctrl+A
+        input[1]=KeyInput(0x41,0,0);
+        input[2]=KeyInput(0x41,0,keyUp);
+        input[3]=KeyInput(0x11,0,keyUp);
+        for(int i=0;i<path.Length;i++){
+            input[4+2*i]=KeyInput(0,path[i],unicode);
+            input[5+2*i]=KeyInput(0,path[i],unicode|keyUp);
+        }
+        var sent=SendInput((uint)input.Length,input,Marshal.SizeOf(typeof(Input)));
+        if(sent!=input.Length)throw new Exception("Windows did not deliver the full filename keyboard input.");
+        var deadline=System.Diagnostics.Stopwatch.StartNew();
+        while(deadline.ElapsedMilliseconds<2500){
+            if(Text(edit)==path)return true;
+            System.Threading.Thread.Sleep(25);
+        }
+        throw new Exception("The focused filename editor did not retain the typed path.");
+    }
+    private static Input KeyInput(ushort key,ushort scan,uint flags){
+        return new Input{type=1,data=new InputData{keyboard=new KeyboardInput{key=key,scan=scan,flags=flags}}};
     }
     public static string AcceptFileDialog(IntPtr owner,IntPtr dialog){
         const uint gwOwner=4,bmClick=0xF5;
@@ -202,20 +244,10 @@ public static class KeyDockWindowProbe {
         if(save==IntPtr.Zero)throw new Exception("The native file dialog has no enabled Save button (IDOK).");
         string title=Caption(dialog),label=Text(save);
         if(GetForegroundWindow()!=dialog)SetForegroundWindow(dialog);
-        string action="button message";
-        var priorDpi=SetThreadDpiAwarenessContext((IntPtr)(-4));
-        try{
-            Rect r;
-            if(GetForegroundWindow()==dialog && GetWindowRect(save,out r)){
-                var pt=new Point((r.left+r.right)/2,(r.top+r.bottom)/2);
-                if(WindowFromPoint(pt)==save && MouseClick(pt,false))action="physical click";
-            }
-        }finally{
-            if(priorDpi!=IntPtr.Zero)SetThreadDpiAwarenessContext(priorDpi);
-        }
-        if(action=="button message" && !Post(save,bmClick,IntPtr.Zero,IntPtr.Zero))
+        bool clicked=GetForegroundWindow()==dialog && ClickVisibleControl(save);
+        if(!clicked && !Post(save,bmClick,IntPtr.Zero,IntPtr.Zero))
             throw new Exception("Could not activate the native Save button.");
-        return String.Format("Accepted owned dialog \"{0}\" using Save control ID {1} (\"{2}\") by {3}",title,idOk,label,action);
+        return String.Format("Accepted owned dialog \"{0}\" using Save control ID {1} (\"{2}\") by {3}",title,idOk,label,clicked?"physical click":"button message");
     }
     public static string VisibleDialogs(int process){
         var info=new StringBuilder();
@@ -239,6 +271,17 @@ public static class KeyDockWindowProbe {
         mouse_event(right?0x08U:0x02U,0,0,0,UIntPtr.Zero);
         mouse_event(right?0x10U:0x04U,0,0,0,UIntPtr.Zero);
         return true;
+    }
+    private static bool ClickVisibleControl(IntPtr control){
+        var priorDpi=SetThreadDpiAwarenessContext((IntPtr)(-4));
+        try{
+            Rect r;
+            if(!GetWindowRect(control,out r))return false;
+            var pt=new Point((r.left+r.right)/2,(r.top+r.bottom)/2);
+            return WindowFromPoint(pt)==control && MouseClick(pt,false);
+        }finally{
+            if(priorDpi!=IntPtr.Zero)SetThreadDpiAwarenessContext(priorDpi);
+        }
     }
     public static bool RightClickTrayIcon(IntPtr sink) {
         Rect r;if(!TrayRect(sink,out r))return false;
