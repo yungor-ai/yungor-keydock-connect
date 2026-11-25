@@ -104,4 +104,11 @@ func TestWindowsTUNRoutesAndWinINetRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkRestored(luid)
+	// A worker terminated without its graceful cleanup must also allow the user
+	// to start TUN again after its traffic routes have been restored.
+	luid = start()
+	if err := m.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	checkRestored(luid)
 }

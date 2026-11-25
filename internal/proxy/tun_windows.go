@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"strings"
@@ -15,15 +16,16 @@ import (
 )
 
 var (
-	ipHelper           = windows.NewLazySystemDLL("iphlpapi.dll")
-	bestInterface      = ipHelper.NewProc("GetBestInterfaceEx")
-	deleteRoute        = ipHelper.NewProc("DeleteIpForwardEntry2")
-	consoleAPI         = windows.NewLazySystemDLL("kernel32.dll")
-	attachConsole      = consoleAPI.NewProc("AttachConsole")
-	freeConsole        = consoleAPI.NewProc("FreeConsole")
-	consoleProcesses   = consoleAPI.NewProc("GetConsoleProcessList")
-	setConsoleHandler  = consoleAPI.NewProc("SetConsoleCtrlHandler")
-	errTUNStillPresent = errors.New("KeyDockTun 适配器尚未移除")
+	ipHelper            = windows.NewLazySystemDLL("iphlpapi.dll")
+	bestInterface       = ipHelper.NewProc("GetBestInterfaceEx")
+	deleteRoute         = ipHelper.NewProc("DeleteIpForwardEntry2")
+	consoleAPI          = windows.NewLazySystemDLL("kernel32.dll")
+	attachConsole       = consoleAPI.NewProc("AttachConsole")
+	freeConsole         = consoleAPI.NewProc("FreeConsole")
+	consoleProcesses    = consoleAPI.NewProc("GetConsoleProcessList")
+	setConsoleHandler   = consoleAPI.NewProc("SetConsoleCtrlHandler")
+	networkAdapterClass = windows.GUID{Data1: 0x4d36e972, Data2: 0xe325, Data3: 0x11ce,
+		Data4: [8]byte{0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18}}
 )
 
 func (m *Manager) CheckMode(mode Mode) error {
@@ -64,28 +66,12 @@ func checkTUNStart() error {
 	if current.Flags&manualOrScript != 0 {
 		return errors.New("Windows 已开启手动代理或代理设置脚本。请关闭该设置后再启用 TUN")
 	}
-	// The Windows PnP removal after process or handle closure is asynchronous.
-	// We hold the cross-session reservation here, so a new KeyDock worker
-	// cannot claim the adapter while Windows finishes the previous removal.
-	if err := waitForTUNRemoval(); err != nil {
-		if errors.Is(err, errTUNStillPresent) {
-			return errors.New("检测到 KeyDockTun 虚拟网卡仍存在。请重启 Windows 后再启用 TUN。若仍出现此提示，请联系管理员检查该虚拟网卡")
-		}
-		return err
-	}
-	luid, _, err := findTUNAdapter()
-	if err != nil {
-		return err
-	}
-	if luid != 0 {
-		return errors.New("Windows 已有同名的 KeyDockTun 适配器。请联系管理员检查该网卡名称后再启用 TUN")
-	}
-	return nil
+	return waitForTUNIdle()
 }
 
 // sing-tun derives the Wintun adapter's requested GUID from its device name.
-// Check both the alias and GUID during preflight so an existing device is
-// never reused. A GUID match also identifies our new device after startup.
+// Preflight checks both the alias and GUID before reusing an idle device.
+// The GUID also identifies our interface after startup.
 func tunAdapterGUID() windows.GUID {
 	sum := md5.Sum([]byte("wintun" + tunDeviceName))
 	return windows.GUID{
@@ -101,9 +87,17 @@ func findTUNAdapter() (luid uint64, index uint32, err error) {
 }
 
 func lookupTUNAdapter(checkAlias bool) (luid uint64, index uint32, err error) {
+	row, err := tunInterface(checkAlias)
+	if err != nil || row == nil {
+		return 0, 0, err
+	}
+	return row.InterfaceLuid, row.InterfaceIndex, nil
+}
+
+func tunInterface(checkAlias bool) (*windows.MibIfRow2, error) {
 	var table *windows.MibIfTable2
 	if err := windows.GetIfTable2Ex(windows.MibIfTableNormalWithoutStatistics, &table); err != nil {
-		return 0, 0, err
+		return nil, err
 	}
 	defer windows.FreeMibTable(unsafe.Pointer(table))
 	guid := tunAdapterGUID()
@@ -111,11 +105,11 @@ func lookupTUNAdapter(checkAlias bool) (luid uint64, index uint32, err error) {
 	for index := range rows {
 		row := &rows[index]
 		if row.InterfaceGuid == guid || checkAlias && strings.EqualFold(windows.UTF16ToString(row.Alias[:]), tunDeviceName) {
-			// The LUID identifies this route table even if the alias changes.
-			return row.InterfaceLuid, row.InterfaceIndex, nil
+			result := *row
+			return &result, nil
 		}
 	}
-	return 0, 0, nil
+	return nil, nil
 }
 
 func tunRoutes(luid uint64) ([]windows.MibIpForwardRow2, error) {
@@ -279,23 +273,70 @@ func (p *child) clearTUNRoutes() error {
 	if len(routes) != 0 {
 		return errors.New("KeyDock TUN 路由未恢复，请联系管理员检查网络适配器")
 	}
-	err = waitForTUNRemoval()
-	if errors.Is(err, errTUNStillPresent) {
-		return errors.New("KeyDock TUN 路由已撤销，虚拟网卡仍存在。请重启 Windows。若仍出现此提示，请联系管理员检查该虚拟网卡")
-	}
-	return err
+	return nil
 }
 
-func waitForTUNRemoval() error {
+// With the machine-wide reservation held, allow sing-tun to reopen its own
+// idle adapter. Windows can keep the network-interface row after it unplugs
+// a software device. No routed or unrelated adapter may be reused.
+func waitForTUNIdle() error {
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		luid, _, err := lookupTUNAdapter(false)
-		if err != nil || luid == 0 {
+		row, err := tunInterface(true)
+		if err != nil || row == nil {
 			return err
 		}
+		if row.InterfaceGuid != tunAdapterGUID() || !strings.EqualFold(windows.UTF16ToString(row.Alias[:]), tunDeviceName) {
+			return errors.New("Windows 已有冲突的 KeyDockTun 适配器。请联系管理员检查该网卡后再启用 TUN")
+		}
+		routes, err := tunRoutes(row.InterfaceLuid)
+		if err != nil {
+			return err
+		}
+		down := row.OperStatus == windows.IfOperStatusDown || row.OperStatus == windows.IfOperStatusNotPresent ||
+			row.OperStatus == windows.IfOperStatusLowerLayerDown
+		if down && len(routes) == 0 {
+			return verifyTUNDriver()
+		}
 		if time.Now().After(deadline) {
-			return errTUNStillPresent
+			return fmt.Errorf("KeyDockTun 网卡未进入空闲状态（状态 %d，默认路由 %d）。请重启 Windows 后再启用 TUN", row.OperStatus, len(routes))
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func verifyTUNDriver() error {
+	const enumerator = `SWD\Wintun`
+	devices, err := windows.SetupDiGetClassDevsEx(&networkAdapterClass, enumerator, 0, windows.DIGCF_PRESENT, 0, "")
+	if err != nil {
+		return err
+	}
+	defer devices.Close()
+	wantedID := enumerator + `\` + tunAdapterGUID().String()
+	for index := 0; ; index++ {
+		info, err := devices.EnumDeviceInfo(index)
+		if errors.Is(err, windows.ERROR_NO_MORE_ITEMS) {
+			// A cached IP Helper row without a present PnP device may be recreated.
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		id, err := devices.DeviceInstanceID(info)
+		if err != nil {
+			return err
+		}
+		if !strings.EqualFold(id, wantedID) {
+			continue
+		}
+		value, err := devices.DeviceRegistryProperty(info, windows.SPDRP_SERVICE)
+		if err != nil {
+			return err
+		}
+		service, ok := value.(string)
+		if !ok || !strings.EqualFold(service, "Wintun") {
+			return errors.New("KeyDockTun 的驱动与内置 Wintun 不一致。请联系管理员检查网卡")
+		}
+		return nil
 	}
 }
