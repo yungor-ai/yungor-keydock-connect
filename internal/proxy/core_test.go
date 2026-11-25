@@ -78,7 +78,10 @@ func TestSS2022DataPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	ssPort, stopServer := fixturePeer(t, core)
-	clientPort := reservePort(t)
+	clientPort, err := loopbackPort()
+	if err != nil {
+		t.Fatal(err)
+	}
 	// No external groups, GEO downloads, or health probes in this data path.
 	source := strings.Replace(peerSubscription(ssPort), "MATCH,test-node", "MATCH,DIRECT", 1)
 	clientProfile, err := buildRouting([]byte(source), clientPort, true)
@@ -132,6 +135,7 @@ log-level: warning
 listeners:
   - name: fixture-ss
     type: shadowsocks
+    udp: false
     listen: 127.0.0.1
     port: %d
     cipher: 2022-blake3-aes-128-gcm

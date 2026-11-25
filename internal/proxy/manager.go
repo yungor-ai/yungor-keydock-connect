@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"errors"
+	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -34,6 +36,26 @@ func (m *Manager) ActiveMode() Mode {
 		return ""
 	}
 	return p.mode
+}
+
+// Mihomo's mixed listener needs the same port for TCP and UDP. Windows
+// can reserve a port range for one transport independently of the other.
+func loopbackPort() (int, error) {
+	loopback := net.IPv4(127, 0, 0, 1)
+	for range 16 {
+		tcp, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: loopback})
+		if err != nil {
+			break
+		}
+		port := tcp.Addr().(*net.TCPAddr).Port
+		udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: loopback, Port: port})
+		tcp.Close()
+		if err == nil {
+			udp.Close()
+			return port, nil
+		}
+	}
+	return 0, errors.New("无法分配本机代理端口")
 }
 
 // SetDiagnostics attaches the app log before the manager starts any operations.

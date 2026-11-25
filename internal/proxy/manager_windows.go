@@ -9,7 +9,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -328,15 +327,6 @@ func (m *Manager) StartMode(raw string, mode Mode) error {
 		return err
 	}
 	return m.startSubscriptionLocked(ctx, body, mode)
-}
-
-func loopbackPort() (int, error) {
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		return 0, errors.New("无法分配本机代理端口")
-	}
-	defer listener.Close()
-	return listener.Addr().(*net.TCPAddr).Port, nil
 }
 
 func (m *Manager) startProfileLocked(body []byte) error {

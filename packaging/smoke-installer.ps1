@@ -80,6 +80,7 @@ log-level: silent
 listeners:
   - name: fixture-ss
     type: shadowsocks
+    udp: false
     listen: 127.0.0.1
     port: $ssPort
     cipher: 2022-blake3-aes-128-gcm
