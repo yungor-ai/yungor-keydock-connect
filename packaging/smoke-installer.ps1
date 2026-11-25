@@ -209,11 +209,12 @@ try {
             [KeyDockWindowProbe]::CheckStatus($handle,'Codex 配置','完成','synthetic-model') -and
             [KeyDockWindowProbe]::CheckStatus($handle,'模型连通','完成',$null) -and
             [KeyDockWindowProbe]::CheckStatus($handle,'代理连通','失败','HTTP 503') -and
+            [KeyDockWindowProbe]::Child($handle,'label','代理故障排查') -ne [IntPtr]::Zero -and
             [KeyDockWindowProbe]::Child($handle,'label',$clockHint) -ne [IntPtr]::Zero -and
             [KeyDockWindowProbe]::Child($handle,'label',$tunHint) -ne [IntPtr]::Zero -and
             [KeyDockWindowProbe]::IsWindowVisible($timeSettings)
         }
-        [KeyDockWindowProbe]::Capture($handle,(Join-Path $shots '06-proxy-troubleshooting.png'),'代理故障排查')
+        [KeyDockWindowProbe]::Capture($handle,(Join-Path $shots '06-proxy-troubleshooting.png'),'设备接入')
     } finally {
         Remove-Item -LiteralPath $skewMarker
     }
