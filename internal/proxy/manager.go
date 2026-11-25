@@ -1,7 +1,8 @@
 package proxy
 
 import (
-	"errors"
+	"fmt"
+	"math/rand/v2"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -42,20 +43,31 @@ func (m *Manager) ActiveMode() Mode {
 // can reserve a port range for one transport independently of the other.
 func loopbackPort() (int, error) {
 	loopback := net.IPv4(127, 0, 0, 1)
-	for range 16 {
-		tcp, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: loopback})
-		if err != nil {
-			break
+	var lastErr error
+	for attempt := range 32 {
+		port := 0
+		// UDP's automatic allocation skips its excluded ports. If those
+		// choices conflict with TCP, spread retries outside the default
+		// Windows dynamic port range instead of scanning adjacent ports.
+		if attempt >= 8 {
+			port = 20000 + rand.IntN(49152-20000)
 		}
-		port := tcp.Addr().(*net.TCPAddr).Port
 		udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: loopback, Port: port})
-		tcp.Close()
-		if err == nil {
-			udp.Close()
-			return port, nil
+		if err != nil {
+			lastErr = err
+			continue
 		}
+		port = udp.LocalAddr().(*net.UDPAddr).Port
+		tcp, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: loopback, Port: port})
+		udp.Close()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		tcp.Close()
+		return port, nil
 	}
-	return 0, errors.New("无法分配本机代理端口")
+	return 0, fmt.Errorf("无法分配本机代理端口：%w", lastErr)
 }
 
 // SetDiagnostics attaches the app log before the manager starts any operations.
