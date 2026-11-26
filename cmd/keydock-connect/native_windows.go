@@ -68,45 +68,33 @@ func runWindow(dir string, controller *desktop.Controller) error {
 		}
 	}()
 	ui.window.SetExitOnClose(false)
-	tray, err := walk.NewNotifyIconWithGUID(trayGUID)
-	if err != nil {
-		return err
-	}
-	defer tray.Dispose()
-	if err = tray.SetIcon(icon); err != nil {
-		return err
-	}
-	if err = tray.SetToolTip("KeyDock Connect"); err != nil {
-		return err
-	}
-	addAction := func(label string, fn func()) error {
-		action := walk.NewAction()
-		if err := action.SetText(label); err != nil {
-			return err
+	var tray *walk.NotifyIcon
+	if windowsTaskbarAvailable() {
+		tray = ui.createTray(icon, func() (*walk.NotifyIcon, error) { return walk.NewNotifyIconWithGUID(trayGUID) })
+		if tray == nil {
+			// Explorer can retain the GUID's original executable path after a move.
+			tray = ui.createTray(icon, walk.NewNotifyIcon)
 		}
-		action.Triggered().Attach(fn)
-		return tray.ContextMenu().Actions().Add(action)
 	}
-	if err = addAction("打开 KeyDock Connect", ui.show); err != nil {
-		return err
-	}
-	if err = addAction("退出接入助手", ui.quit); err != nil {
-		return err
-	}
-	tray.MouseUp().Attach(func(_, _ int, b walk.MouseButton) {
-		if b == walk.LeftButton {
-			ui.show()
-		}
-	})
-	if err = tray.SetVisible(true); err != nil {
-		return err
+	if tray != nil {
+		defer tray.Dispose()
+	} else {
+		ui.setMessage("系统托盘暂不可用，关闭窗口将退出接入助手。", ui.colors.muted)
 	}
 	cleanup, err := watchActivation(dir, func() { app.Synchronize(ui.show) })
 	if err != nil {
 		return err
 	}
 	defer cleanup()
-	ui.window.Closing().Attach(func(canceled *bool, _ walk.CloseReason) { *canceled = true; ui.key.SetText(""); ui.window.Hide() })
+	ui.window.Closing().Attach(func(canceled *bool, _ walk.CloseReason) {
+		*canceled = true
+		if tray == nil || !windowsTaskbarAvailable() {
+			ui.quit()
+			return
+		}
+		ui.key.SetText("")
+		ui.window.Hide()
+	})
 	ui.refresh()
 	ui.server.SetText(ui.state.ServerURL)
 	ui.renderChecks()
@@ -143,6 +131,55 @@ func runWindow(dir string, controller *desktop.Controller) error {
 		return nil
 	}
 	return controller.Close() // Includes session shutdown initiated by Windows.
+}
+
+func windowsTaskbarAvailable() bool {
+	// Walk can return a deferred notification icon before Explorer is ready.
+	bar := win.APPBARDATA{CbSize: uint32(unsafe.Sizeof(win.APPBARDATA{}))}
+	return win.SHAppBarMessage(win.ABM_GETTASKBARPOS, &bar) != 0
+}
+
+func (ui *nativeWindow) createTray(icon *walk.Icon, register func() (*walk.NotifyIcon, error)) *walk.NotifyIcon {
+	tray, err := register()
+	if err != nil {
+		return nil
+	}
+	ready := false
+	defer func() {
+		if !ready {
+			tray.Dispose()
+		}
+	}()
+	if err := tray.SetIcon(icon); err != nil {
+		return nil
+	}
+	if err := tray.SetToolTip("KeyDock Connect"); err != nil {
+		return nil
+	}
+	addAction := func(label string, fn func()) error {
+		action := walk.NewAction()
+		if err := action.SetText(label); err != nil {
+			return err
+		}
+		action.Triggered().Attach(fn)
+		return tray.ContextMenu().Actions().Add(action)
+	}
+	if err := addAction("打开 KeyDock Connect", ui.show); err != nil {
+		return nil
+	}
+	if err := addAction("退出接入助手", ui.quit); err != nil {
+		return nil
+	}
+	tray.MouseUp().Attach(func(_, _ int, b walk.MouseButton) {
+		if b == walk.LeftButton {
+			ui.show()
+		}
+	})
+	if err := tray.SetVisible(true); err != nil {
+		return nil
+	}
+	ready = true
+	return tray
 }
 
 func (ui *nativeWindow) show() {

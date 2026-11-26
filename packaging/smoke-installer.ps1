@@ -124,6 +124,46 @@ function Get-ProxyActionCount {
     $history = Get-Content -Raw -LiteralPath (Join-Path $state 'diagnostics-history.json') | ConvertFrom-Json
     return @($history | Where-Object { $_.stage -in @('proxy.enable','proxy.disable') }).Count
 }
+function Test-CrossPathTrayFallback {
+    if (-not [KeyDockWindowProbe]::HasGuidTray() -or [KeyDockWindowProbe]::AnonymousTray($process.Id) -ne [IntPtr]::Zero) {
+        throw 'The installed instance must own its GUID tray icon before testing a different executable path.'
+    }
+    # Explorer binds the GUID to the installed executable. A separate
+    # application state directory permits a second process from the staged path.
+    $info = New-Object Diagnostics.ProcessStartInfo
+    $info.FileName = Join-Path $stage 'KeyDockConnect.exe'
+    $info.UseShellExecute = $false
+    $info.EnvironmentVariables['APPDATA'] = Join-Path $testRoot 'tray-fallback-appdata'
+    $info.EnvironmentVariables['CODEX_HOME'] = Join-Path $testRoot 'tray-fallback-codex'
+    $alternate = [Diagnostics.Process]::Start($info)
+    try {
+        $alternateWindow = Wait-For 'secondary native window at a different executable path' {
+            if ($alternate.HasExited -or [KeyDockWindowProbe]::Window($alternate.Id,'#32770','KeyDock 接入助手') -ne [IntPtr]::Zero) {
+                throw 'The secondary instance failed during startup.'
+            }
+            $h = [KeyDockWindowProbe]::Window($alternate.Id,$null,"KeyDock Connect v$version")
+            if ($h -ne [IntPtr]::Zero -and [KeyDockWindowProbe]::IsWindowVisible($h)) { $h }
+        }
+        $fallbackSink = Wait-For 'secondary anonymous notification icon' {
+            $h = [KeyDockWindowProbe]::AnonymousTray($alternate.Id)
+            if ($h -ne [IntPtr]::Zero) { $h }
+        }
+        [KeyDockWindowProbe]::HideViaClose($alternateWindow)
+        $null = Wait-For 'hidden secondary window after close' { -not [KeyDockWindowProbe]::IsWindowVisible($alternateWindow) }
+        [KeyDockWindowProbe]::SelectTray($fallbackSink)
+        $null = Wait-For 'secondary window reopened through its fallback tray' { [KeyDockWindowProbe]::IsWindowVisible($alternateWindow) }
+        [KeyDockWindowProbe]::Click([KeyDockWindowProbe]::Child($alternateWindow,'button','退出接入助手'))
+        if (-not $alternate.WaitForExit(15000) -or $alternate.ExitCode -ne 0) {
+            throw 'The secondary instance failed to exit cleanly.'
+        }
+    } finally {
+        if (-not $alternate.HasExited) { $alternate.Kill(); $null = $alternate.WaitForExit(5000) }
+        $alternate.Dispose()
+    }
+    if ($process.HasExited -or -not [KeyDockWindowProbe]::HasGuidTray()) {
+        throw 'The secondary instance interrupted the installed instance or its GUID tray.'
+    }
+}
 try {
     $null = Wait-For 'test gateway' { Test-Path (Join-Path $testRoot 'fixture-origin') }
     $origin = Get-Content -Raw (Join-Path $testRoot 'fixture-origin')
@@ -164,6 +204,8 @@ try {
         throw 'The native window still contains the Open Codex button.'
     }
     [KeyDockWindowProbe]::Capture($handle,(Join-Path $shots '01-first-launch.png'),'设备接入')
+    Test-CrossPathTrayFallback
+    [KeyDockWindowProbe]::SelectTray($initialSink)
     [KeyDockWindowProbe]::Enter($serverField,$origin)
     [KeyDockWindowProbe]::Click([KeyDockWindowProbe]::Child($handle,'button','检查更新'))
     $updateDialog = Wait-For 'update confirmation using the entered server without a Device Key' {

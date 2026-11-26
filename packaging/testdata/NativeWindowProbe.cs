@@ -277,6 +277,26 @@ public static class KeyDockWindowProbe {
         var item=new TrayItem {size=(uint)Marshal.SizeOf(typeof(TrayItem)),guid=new Guid("ad3e9258-1960-428e-a59f-407e2d9469e3")};
         return Shell_NotifyIconGetRect(ref item,out box)==0 && box.right>box.left && box.bottom>box.top;
     }
+    public static bool HasGuidTray(){
+        Rect box;
+        return TrayRect(IntPtr.Zero,out box);
+    }
+    public static IntPtr AnonymousTray(int process){
+        IntPtr sink=IntPtr.Zero;
+        EnumWindows((h,a)=>{
+            uint pid;
+            GetWindowThreadProcessId(h,out pid);
+            if(pid!=process || Class(h)!="WalkNotifyIconSink")return true;
+            // Walk uses the pair of window handle and UID 0 for its first
+            // non-GUID tray icon. A rejected GUID can leave another sink.
+            var item=new TrayItem {size=(uint)Marshal.SizeOf(typeof(TrayItem)),window=h,id=0,guid=Guid.Empty};
+            Rect box;
+            if(Shell_NotifyIconGetRect(ref item,out box)!=0 || box.right<=box.left || box.bottom<=box.top)return true;
+            sink=h;
+            return false;
+        },IntPtr.Zero);
+        return sink;
+    }
     private static bool MouseClick(Point point,bool right) {
         if(!SetCursorPos(point.X,point.Y))return false;
         mouse_event(right?0x08U:0x02U,0,0,0,UIntPtr.Zero);
