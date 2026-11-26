@@ -253,6 +253,7 @@ func kdMacQuit() {
 	go func() {
 		current.actions.Wait()
 		if err := current.controller.Close(); err != nil {
+			publishMacState(current.controller.State(), false)
 			message := C.CString(err.Error())
 			defer C.free(unsafe.Pointer(message))
 			C.kdFinishTermination(message)
