@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -52,6 +53,22 @@ func main() {
 	origin := "https://" + listen.Addr().String()
 	mux := http.NewServeMux()
 	clockSkewFailure := filepath.Join(dir, "proxy-clock-skew-failure")
+	mux.HandleFunc("GET /api/connect/v1/update", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("platform") != "windows-x64" || r.URL.Query().Get("version") == "" || r.Header.Get("Authorization") != "" {
+			http.Error(w, "unexpected update check", http.StatusBadRequest)
+			return
+		}
+		digest := strings.Repeat("a", 64)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"update_available": true, "latest_version": "99.0.0", "sha256": digest,
+			"download_path": "/api/software/keydock-connect-windows-x64/download?digest=" + digest,
+		})
+	})
+	mux.HandleFunc("GET /api/software/keydock-connect-windows-x64/download", func(w http.ResponseWriter, r *http.Request) {
+		check(os.WriteFile(filepath.Join(dir, "unexpected-update-download"), nil, 0600))
+		http.Error(w, "fixture does not serve update binaries", http.StatusNotFound)
+	})
 	mux.HandleFunc("POST /api/connect/v1/device", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer fixture-device-key" {
 			http.Error(w, "denied", 401)

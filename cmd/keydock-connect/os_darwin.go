@@ -13,6 +13,7 @@ import "C"
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -66,6 +67,7 @@ type macWindow struct {
 	actionLifetime context.Context
 	stopActions    context.CancelFunc
 	actions        sync.WaitGroup
+	update         macUpdate
 }
 
 // Cocoa calls the exported functions on its main thread. Workers only publish
@@ -208,10 +210,14 @@ func kdMacAction(action C.int, first, second *C.char) {
 			}
 		}
 		publishMacState(controller.State(), false)
-		value := C.CString(message)
-		defer C.free(unsafe.Pointer(value))
-		C.kdFinishOperation(value, cFlag(err != nil))
+		finishMacOperation(message, err != nil)
 	}()
+}
+
+func finishMacOperation(message string, failed bool) {
+	value := C.CString(message)
+	defer C.free(unsafe.Pointer(value))
+	C.kdFinishOperation(value, cFlag(failed))
 }
 
 //export kdMacResumeActions
@@ -244,16 +250,28 @@ func setMacProxyMode(controller *desktop.Controller, enable bool, mode proxy.Mod
 }
 
 //export kdMacQuit
-func kdMacQuit() {
+func kdMacQuit(applyUpdate C.int) {
 	current := window
 	current.stopActions()
 	go func() {
 		current.actions.Wait()
-		if err := current.controller.Close(); err != nil {
-			publishMacState(current.controller.State(), false)
+		prepared := current.update.takeInstall()
+		err := current.controller.Close()
+		if err == nil && applyUpdate != 0 {
+			if prepared == nil {
+				err = errors.New("更新尚未准备完成，请重新检查更新。")
+			} else if installErr := prepared.Install(); installErr != nil {
+				err = fmt.Errorf("无法安装更新：%w", installErr)
+			}
+		}
+		if prepared != nil {
+			prepared.Discard()
+		}
+		if err != nil {
 			message := C.CString(err.Error())
 			defer C.free(unsafe.Pointer(message))
 			C.kdFinishTermination(message)
+			publishMacState(current.controller.State(), false)
 			return
 		}
 		current.stop()

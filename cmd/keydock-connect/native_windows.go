@@ -34,12 +34,14 @@ type nativeWindow struct {
 	colors                     windowColors
 	connect, proxy, restore    *walk.PushButton
 	export, timeSettings       *walk.PushButton
+	downloads, checkUpdates    *walk.PushButton
 	state                      desktop.State
 	cleaned                    bool
 	results                    map[string]desktop.Check
 	cancel                     context.CancelFunc
 	quitting                   bool
 	choosingExportPath         bool
+	confirmingUpdate           bool
 }
 
 func runWindow(dir string, controller *desktop.Controller) error {
@@ -144,7 +146,7 @@ func runWindow(dir string, controller *desktop.Controller) error {
 }
 
 func (ui *nativeWindow) show() {
-	if ui.quitting || ui.choosingExportPath {
+	if ui.quitting || ui.choosingExportPath || ui.confirmingUpdate {
 		return
 	}
 	if ui.cancel == nil {
@@ -183,6 +185,8 @@ func (ui *nativeWindow) enable() {
 	ui.restore.SetEnabled(idle && ui.state.Restorable)
 	ui.export.SetEnabled(idle)
 	ui.timeSettings.SetEnabled(idle)
+	ui.downloads.SetEnabled(idle)
+	ui.checkUpdates.SetEnabled(idle)
 	ui.renderProxy()
 }
 
@@ -252,7 +256,17 @@ func (ui *nativeWindow) startConnect() {
 }
 
 func (ui *nativeWindow) runAction(progress, done string, action func(context.Context) error) {
-	if ui.cancel != nil || ui.quitting {
+	ui.runTask(progress, action, func(err error) {
+		if err != nil {
+			ui.setMessage(err.Error(), ui.colors.danger)
+		} else {
+			ui.setMessage(done, ui.colors.success)
+		}
+	})
+}
+
+func (ui *nativeWindow) runTask(progress string, action func(context.Context) error, completed func(error)) {
+	if ui.cancel != nil || ui.quitting || ui.choosingExportPath || ui.confirmingUpdate {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -269,11 +283,7 @@ func (ui *nativeWindow) runAction(progress, done string, action func(context.Con
 				return
 			}
 			ui.refresh()
-			if err != nil {
-				ui.setMessage(err.Error(), ui.colors.danger)
-			} else {
-				ui.setMessage(done, ui.colors.success)
-			}
+			completed(err)
 		})
 	}()
 }
@@ -285,7 +295,7 @@ func (ui *nativeWindow) setMessage(text string, color walk.Color) {
 }
 
 func (ui *nativeWindow) quit() {
-	if ui.quitting || ui.choosingExportPath {
+	if ui.quitting || ui.choosingExportPath || ui.confirmingUpdate {
 		return
 	}
 	ui.quitting = true
@@ -310,9 +320,13 @@ func (ui *nativeWindow) finishQuit() {
 				ui.setMessage("退出前无法恢复系统代理："+err.Error(), ui.colors.danger)
 				return
 			}
-			ui.cleaned = true
-			ui.window.Dispose()
-			ui.app.Exit(0)
+			ui.exitAfterCleanup()
 		})
 	}()
+}
+
+func (ui *nativeWindow) exitAfterCleanup() {
+	ui.cleaned = true
+	ui.window.Dispose()
+	ui.app.Exit(0)
 }

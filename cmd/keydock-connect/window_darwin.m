@@ -24,6 +24,8 @@ static NSString *const reopenNotification = @"ai.yungor.keydock-connect.reopen";
 @property NSArray<NSTextField *> *checkStatus;
 @property NSArray<NSTextField *> *checkDetails;
 @property NSButton *connectButton;
+@property NSButton *softwareButton;
+@property NSButton *updateButton;
 @property NSButton *networkCheckButton;
 @property NSPopUpButton *proxyModePicker;
 @property NSButton *proxyButton;
@@ -34,6 +36,7 @@ static NSString *const reopenNotification = @"ai.yungor.keydock-connect.reopen";
 @property int proxyMode;
 @property BOOL busy;
 @property BOOL quitting;
+@property BOOL installingUpdate;
 @property BOOL restorable;
 @property BOOL subscription;
 @end
@@ -224,6 +227,7 @@ static NSArray<NSString *> *checkDescriptions(void) {
     self.server.placeholderString = @"https://keydock.example.com";
     self.server.bezelStyle = NSTextFieldSquareBezel;
     self.server.accessibilityLabel = @"服务器地址";
+    self.server.accessibilityIdentifier = @"keydock.server";
     self.deviceKey = [NSSecureTextField new];
     self.deviceKey.placeholderString = @"管理员签发的设备密钥";
     self.deviceKey.bezelStyle = NSTextFieldSquareBezel;
@@ -244,8 +248,14 @@ static NSArray<NSString *> *checkDescriptions(void) {
     [serverField.widthAnchor constraintEqualToAnchor:keyField.widthAnchor].active = YES;
     self.server.nextKeyView = self.deviceKey;
     self.deviceKey.nextKeyView = self.connectButton;
+    self.softwareButton = [self button:@"软件下载" action:@selector(openSoftware:)];
+    self.softwareButton.accessibilityIdentifier = @"keydock.software";
+    self.updateButton = [self button:@"检查更新" action:@selector(checkUpdate:)];
+    self.updateButton.accessibilityIdentifier = @"keydock.check-update";
+    NSStackView *connectionHeader = stack(@[heading(@"连接设置"), [NSView new], self.softwareButton, self.updateButton],
+                                          NSUserInterfaceLayoutOrientationHorizontal, 8);
     NSEdgeInsets sectionInsets = NSEdgeInsetsMake(12, 18, 14, 18);
-    KDSurface *connection = surface(column(@[heading(@"连接设置"), form], 8), card, sectionInsets);
+    KDSurface *connection = surface(column(@[connectionHeader, form], 8), card, sectionInsets);
 
     self.networkCheckButton = [self button:@"重新检测网络" action:@selector(recheckNetwork:)];
     self.exportButton = [self button:@"导出诊断日志" action:@selector(exportLog:)];
@@ -322,6 +332,7 @@ static NSArray<NSString *> *checkDescriptions(void) {
     ]];
 
     self.notice = label(@"关闭窗口后可从菜单栏重新打开。", 12, NSFontWeightRegular, secondary);
+    self.notice.accessibilityIdentifier = @"keydock.notice";
     singleLine(self.notice);
     self.restoreButton = [self button:@"恢复原 Codex 配置" action:@selector(restore:)];
     NSButton *quit = [self button:@"退出接入助手" action:@selector(terminate:)];
@@ -388,7 +399,7 @@ static NSArray<NSString *> *checkDescriptions(void) {
     if (!self.quitting) {
         self.quitting = YES;
         [self updateButtons];
-        kdMacQuit();
+        kdMacQuit(self.installingUpdate ? 1 : 0);
     }
     return NSTerminateLater;
 }
@@ -396,6 +407,8 @@ static NSArray<NSString *> *checkDescriptions(void) {
 - (void)updateButtons {
     BOOL idle = !self.busy && !self.quitting;
     self.connectButton.enabled = idle;
+    self.softwareButton.enabled = idle;
+    self.updateButton.enabled = idle;
     self.networkCheckButton.enabled = !self.quitting;
     self.server.enabled = idle;
     self.deviceKey.enabled = idle;
@@ -499,6 +512,27 @@ static NSArray<NSString *> *checkDescriptions(void) {
     }
     [self showTroubleshooting:@""];
     [self runAction:KD_CONNECT first:self.server.stringValue second:key];
+}
+
+- (void)openSoftware:(id)sender {
+    [self.window makeFirstResponder:nil];
+    char *value = kdMacSoftwareURL((char *)self.server.stringValue.UTF8String);
+    NSURL *url = value ? [NSURL URLWithString:str(value)] : nil;
+    free(value);
+    if (!url) {
+        [self showNotice:@"请填写有效的服务器地址。" failure:YES];
+    } else if (![NSWorkspace.sharedWorkspace openURL:url]) {
+        [self showNotice:@"无法打开软件下载页面。" failure:YES];
+    }
+}
+
+- (void)checkUpdate:(id)sender {
+    if (self.busy || self.quitting) return;
+    [self.window makeFirstResponder:nil];
+    self.busy = YES;
+    [self updateButtons];
+    [self showNotice:@"正在检查更新…" failure:NO];
+    kdMacCheckUpdate((char *)self.server.stringValue.UTF8String);
 }
 
 - (void)recheckNetwork:(id)sender { kdMacRecheckNetwork(); }
@@ -654,6 +688,53 @@ void kdFinishOperation(const char *message, int failed) {
     }
 }
 
+void kdOfferUpdate(const char *version) {
+    @autoreleasepool {
+        NSString *release = str(version);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (ui.quitting) return;
+            [ui reveal];
+            [ui showNotice:[NSString stringWithFormat:@"发现新版本 v%@。", release] failure:NO];
+            NSAlert *alert = [NSAlert new];
+            alert.messageText = [NSString stringWithFormat:@"是否更新到 v%@？", release];
+            alert.informativeText = @"更新将下载安装包，停止接入助手正在运行的代理，然后重启接入助手。";
+            [alert addButtonWithTitle:@"在线更新"];
+            [alert addButtonWithTitle:@"取消"].keyEquivalent = @"\e";
+            [alert beginSheetModalForWindow:ui.window completionHandler:^(NSModalResponse response) {
+                if (ui.quitting) return;
+                BOOL accepted = response == NSAlertFirstButtonReturn;
+                kdMacUpdateDecision(accepted ? 1 : 0);
+                if (accepted) {
+                    [ui showNotice:@"正在下载更新…" failure:NO];
+                } else {
+                    ui.busy = NO;
+                    [ui updateButtons];
+                    [ui showNotice:@"已取消更新。" failure:NO];
+                }
+            }];
+        });
+    }
+}
+
+void kdSetUpdateProgress(const char *message) {
+    @autoreleasepool {
+        NSString *notice = str(message);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!ui.quitting) [ui showNotice:notice failure:NO];
+        });
+    }
+}
+
+void kdRequestUpdateTermination(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (ui.quitting) return;
+        ui.installingUpdate = YES;
+        [ui showNotice:@"正在安装更新…" failure:NO];
+        // The NSTerminateLater loop must be able to run the reply queued by Go.
+        [NSApp performSelector:@selector(terminate:) withObject:nil afterDelay:0];
+    });
+}
+
 void kdFinishTermination(const char *failure) {
     @autoreleasepool {
         NSString *message = str(failure);
@@ -663,6 +744,7 @@ void kdFinishTermination(const char *failure) {
                 return;
             }
             kdMacResumeActions();
+            ui.installingUpdate = NO;
             ui.quitting = NO;
             ui.busy = NO;
             [ui updateButtons];

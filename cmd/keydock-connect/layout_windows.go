@@ -80,7 +80,14 @@ func (ui *nativeWindow) build(icon *walk.Icon) error {
 	connection := d.Composite{
 		Background: colors.card, Layout: section,
 		Children: []d.Widget{
-			heading("连接设置"),
+			d.Composite{Layout: d.HBox{MarginsZero: true, Spacing: 8, Alignment: d.AlignHNearVCenter}, Children: []d.Widget{
+				heading("连接设置"),
+				d.HSpacer{},
+				d.PushButton{AssignTo: &ui.downloads, Text: "软件下载", UseLayoutFlags: true,
+					ToolTipText: "在浏览器打开当前服务器的软件下载页", MinSize: d.Size{Height: 28}, OnClicked: ui.openSoftware},
+				d.PushButton{AssignTo: &ui.checkUpdates, Text: "检查更新", UseLayoutFlags: true,
+					MinSize: d.Size{Height: 28}, OnClicked: ui.checkForUpdate},
+			}},
 			d.Composite{Layout: d.HBox{MarginsZero: true, Spacing: 10, Alignment: d.AlignHNearVFar}, Children: []d.Widget{
 				d.Composite{Layout: fieldLayout, Children: []d.Widget{
 					d.Label{Text: "服务器地址", TextColor: colors.muted},

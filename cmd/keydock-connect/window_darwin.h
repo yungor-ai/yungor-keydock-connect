@@ -31,5 +31,8 @@ void kdSetState(const char *server, const char *device, const char *model,
                 const char *address, const char *updatedAt, int refreshFailed);
 void kdSetCheck(int row, const char *status, const char *message, const char *hint);
 void kdFinishOperation(const char *message, int failed);
+void kdOfferUpdate(const char *version);
+void kdSetUpdateProgress(const char *message);
+void kdRequestUpdateTermination(void);
 void kdFinishTermination(const char *failure);
 #endif

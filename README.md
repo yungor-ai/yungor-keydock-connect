@@ -17,6 +17,12 @@ Windows 安装包可在 KeyDock 服务的 `/software` 下载。安装需要管�
 
 服务端未提供模型时，接入助手默认使用 `gpt-6.2-sol`。连接后以服务端明确下发的模型为准。
 
+## 检查更新
+
+填写 KeyDock 服务地址后，点击 **检查更新**。找到新版时，选择 **在线更新**，助手会核验 GitHub 官方发布的摘要，并从该 KeyDock 服务下载安装包。检查和下载使用所填的 HTTPS 地址，无需填写 Device Key。点击 **软件下载** 可直接打开该地址对应的软件下载页。
+
+安装前，助手会关闭自己启动的代理。Windows 会打开安装程序，按系统提示批准并完成安装。若从 Windows 免安装版切换到安装版，请在新版里点一次 **连接并测试**，更新 Codex 的凭据助手路径。macOS 会替换已安装的应用并重新打开，当前账号需要能写入应用所在目录。设备授权会继续使用。
+
 ## macOS Apple Silicon
 
 1. 在运行 macOS 13 或更新版本的 Apple Silicon Mac 上，使用正式签名并经 Apple 公证的 `KeyDockConnect-macos-arm64.dmg`。将 **KeyDock Connect** 拖到「应用程序」，再从「应用程序」打开。

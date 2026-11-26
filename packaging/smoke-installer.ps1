@@ -165,6 +165,16 @@ try {
     }
     [KeyDockWindowProbe]::Capture($handle,(Join-Path $shots '01-first-launch.png'),'设备接入')
     [KeyDockWindowProbe]::Enter($serverField,$origin)
+    [KeyDockWindowProbe]::Click([KeyDockWindowProbe]::Child($handle,'button','检查更新'))
+    $updateDialog = Wait-For 'update confirmation using the entered server without a Device Key' {
+        $h = [KeyDockWindowProbe]::Window($process.Id,$null,'KeyDock Connect 更新')
+        if ($h -ne [IntPtr]::Zero -and [KeyDockWindowProbe]::Child($h,'label','发现新版本 v99.0.0') -ne [IntPtr]::Zero) { $h }
+    }
+    [KeyDockWindowProbe]::Click([KeyDockWindowProbe]::Child($updateDialog,'button','取消'))
+    $null = Wait-For 'update cancelled with main window still available' {
+        [KeyDockWindowProbe]::Child($handle,'label','已取消更新。') -ne [IntPtr]::Zero
+    }
+    if (Test-Path (Join-Path $testRoot 'unexpected-update-download')) { throw 'Cancelling an update started a download.' }
     [KeyDockWindowProbe]::Enter($keyField,'intentionally-wrong-synthetic-key')
     [KeyDockWindowProbe]::Click($startButton)
     $null = Wait-For 'rejected device credential and enabled retry' {
@@ -261,6 +271,7 @@ try {
     } 55
     Trace-Smoke ("Public 204 probe through local SS peer succeeded: " + [KeyDockWindowProbe]::CheckStatus($handle,'代理连通','完成',$null))
     $managed = [IO.File]::ReadAllBytes($config)
+    $managedHash = (Get-FileHash $config).Hash
     if ($encoding.GetString($managed).Contains($profile.Key)) { throw 'The Codex profile contains a plaintext key.' }
     $shot = Join-Path (Resolve-Path dist/installer).Path 'KeyDockConnect-window.png'
     $connectedShot = Join-Path $shots '03-connected.png'
@@ -338,6 +349,11 @@ try {
 
     $runningAttempt = Invoke-SmokeProcess 'uninstall while app is open' $uninstaller $flags 35
     if ($runningAttempt -eq 0 -or -not (Test-Path $exe)) { throw 'Uninstall must stop while KeyDock Connect is running.' }
+    $updateFlags = $flags + ('/KEYDOCKUPDATEPID=' + $process.Id)
+    $updateWhileRunning = Invoke-SmokeProcess 'online installer while app is open' $installer $updateFlags 35
+    if ($updateWhileRunning -ne 7 -or $process.HasExited -or (Get-FileHash $config).Hash -ne $managedHash) {
+        throw 'Online installer did not preserve the running app and its Codex configuration.'
+    }
     [KeyDockWindowProbe]::HideViaClose($handle)
     $null = Wait-For 'hidden native window' { -not [KeyDockWindowProbe]::IsWindowVisible($handle) }
     if ($process.HasExited) { throw "Primary exited after hide (exit $($process.ExitCode))" }
@@ -374,6 +390,10 @@ try {
     $exitCode = [KeyDockWindowProbe]::ExitStatus($exitHandle)
     Trace-Smoke "Installed application exited through the tray with code $exitCode"
     if ($exitCode -ne 0) { throw "Tray exit failed (exit $exitCode)" }
+    $updateAfterExit = Invoke-SmokeProcess 'online installer after app exit' $installer $updateFlags 45
+    if ($updateAfterExit -ne 0 -or -not (Test-Path $exe) -or (Get-FileHash $config).Hash -ne $managedHash) {
+        throw 'Online installer did not preserve the device configuration after app exit.'
+    }
 
     # Simulate a user edit outside the app. The uninstaller must retain the
     # credential executable and configuration until this conflict is resolved.

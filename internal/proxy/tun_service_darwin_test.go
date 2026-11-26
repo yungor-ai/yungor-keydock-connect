@@ -6,11 +6,36 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/unix"
 )
+
+func TestDarwinTUNDetectsExecutableReplacedAtSamePath(t *testing.T) {
+	dir := t.TempDir()
+	installed, staged := filepath.Join(dir, "installed"), filepath.Join(dir, "staged")
+	for _, path := range []string{installed, staged} {
+		if err := os.WriteFile(path, []byte("executable fixture"), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	original, err := os.Stat(installed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if darwinTUNExecutableChanged(installed, original) {
+		t.Fatal("the unchanged daemon executable was considered replaced")
+	}
+	if err := os.Rename(staged, installed); err != nil {
+		t.Fatal(err)
+	}
+	if !darwinTUNExecutableChanged(installed, original) {
+		t.Fatal("a replacement at the same path was not detected")
+	}
+}
 
 func TestDarwinTUNLeaseStopsOnDisconnect(t *testing.T) {
 	for _, stop := range []string{"requested", "disconnect"} {

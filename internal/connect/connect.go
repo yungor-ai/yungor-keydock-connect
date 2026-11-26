@@ -55,6 +55,9 @@ func endpoint(raw string, allowQuery bool) (*url.URL, error) {
 	return u, nil
 }
 
+// ServerURL validates a KeyDock service base URL for device and public requests.
+func ServerURL(raw string) (*url.URL, error) { return endpoint(raw, false) }
+
 type responseStatus struct {
 	code    int
 	message string
@@ -117,7 +120,7 @@ func readLimited(r io.Reader, limit int64) ([]byte, error) {
 
 func (c Client) Fetch(ctx context.Context, serverURL, deviceKey string) (DeviceConfig, error) {
 	var config DeviceConfig
-	u, err := endpoint(serverURL, false)
+	u, err := ServerURL(serverURL)
 	if err != nil {
 		return config, err
 	}

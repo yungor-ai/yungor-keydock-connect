@@ -36,11 +36,21 @@ type tunRequest struct {
 	uid C.uid_t
 }
 
-// Only the signature-checked XPC listener hands leases to this channel.
-var tunRequests = make(chan tunRequest, 1)
+var (
+	// Only the signature-checked XPC listener hands leases to this channel.
+	tunRequests         = make(chan tunRequest, 1)
+	tunRequestsMu       sync.Mutex
+	tunServiceRetiring  bool
+	errDarwinTUNRestart = errors.New("KeyDock TUN 后台服务正在切换到新版，请稍后重新启用 TUN")
+)
 
 //export kdTUNEnqueue
 func kdTUNEnqueue(fd C.int, uid C.uid_t) C.bool {
+	tunRequestsMu.Lock()
+	defer tunRequestsMu.Unlock()
+	if tunServiceRetiring {
+		return false
+	}
 	select {
 	case tunRequests <- tunRequest{fd: int(fd), uid: uid}:
 		return true
@@ -74,7 +84,7 @@ func requestDarwinTUNChannel() (*net.UnixConn, error) {
 	}
 	if !bool(C.kdTUNRequest(C.int(peer.Fd()), requirement)) {
 		_ = conn.Close()
-		return nil, errors.New("无法连接 KeyDock TUN 后台服务，请检查后台项目授权并使用当前登录的 macOS 会话")
+		return nil, errors.New("无法连接 KeyDock TUN 后台服务，请稍后重试。若仍失败，请检查后台项目授权并使用当前登录的 macOS 会话")
 	}
 	return conn, nil
 }
@@ -111,6 +121,10 @@ func runDarwinTUNService() error {
 	if err != nil || !filepath.IsAbs(executable) {
 		return errors.New("无法定位内置代理核心")
 	}
+	original, err := os.Stat(executable)
+	if err != nil {
+		return errors.New("无法定位 TUN 后台服务程序")
+	}
 	corePath := filepath.Join(filepath.Dir(executable), "..", "Resources", "core", "mihomo")
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
@@ -122,10 +136,21 @@ func runDarwinTUNService() error {
 	var lease sync.Mutex
 	var workers sync.WaitGroup
 	defer workers.Wait()
+	replacementCheck := time.NewTicker(2 * time.Second)
+	defer replacementCheck.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-replacementCheck.C:
+			if lease.TryLock() {
+				changed := darwinTUNExecutableChanged(executable, original)
+				lease.Unlock()
+				if changed {
+					retireDarwinTUNService()
+					return nil
+				}
+			}
 		case request := <-tunRequests:
 			conn, err := tunFileConn(request.fd)
 			if err != nil {
@@ -136,6 +161,13 @@ func runDarwinTUNService() error {
 				_ = conn.Close()
 				continue
 			}
+			if darwinTUNExecutableChanged(executable, original) {
+				lease.Unlock()
+				retireDarwinTUNService()
+				finishDarwinTUNLease(conn, errDarwinTUNRestart)
+				_ = conn.Close()
+				return nil
+			}
 			workers.Add(1)
 			go func() {
 				defer workers.Done()
@@ -144,6 +176,9 @@ func runDarwinTUNService() error {
 				defer cancel()
 				go watchTUNConsole(session, request.uid, cancel)
 				err := serveDarwinTUNLease(session, conn, func(ctx context.Context, body []byte, ready func() error) error {
+					if darwinTUNExecutableChanged(executable, original) {
+						return errDarwinTUNRestart
+					}
 					return runDarwinTUN(ctx, corePath, body, ready)
 				})
 				// The session is free before teardown is acknowledged.
@@ -151,6 +186,27 @@ func runDarwinTUNService() error {
 				finishDarwinTUNLease(conn, err)
 			}()
 		}
+	}
+}
+
+func darwinTUNExecutableChanged(path string, original os.FileInfo) bool {
+	current, err := os.Stat(path)
+	return err != nil || !os.SameFile(original, current)
+}
+
+// Stop accepting requests before withdrawing the XPC listener. launchd will
+// start the installed executable on demand after this daemon exits.
+func retireDarwinTUNService() {
+	tunRequestsMu.Lock()
+	tunServiceRetiring = true
+	tunRequestsMu.Unlock()
+	select {
+	case request := <-tunRequests:
+		if conn, err := tunFileConn(request.fd); err == nil {
+			finishDarwinTUNLease(conn, errDarwinTUNRestart)
+			_ = conn.Close()
+		}
+	default:
 	}
 }
 
