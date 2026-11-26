@@ -134,7 +134,7 @@ function Test-CrossPathTrayIdentity {
     $info.UseShellExecute = $false
     $info.EnvironmentVariables['APPDATA'] = Join-Path $testRoot 'tray-second-appdata'
     $info.EnvironmentVariables['CODEX_HOME'] = Join-Path $testRoot 'tray-second-codex'
-    $alternateState = Join-Path $info.EnvironmentVariables['APPDATA'] 'Yungor\KeyDockConnect'
+    $alternateState = Join-Path ($info.EnvironmentVariables['APPDATA']) 'Yungor\KeyDockConnect'
     $null = New-Item -ItemType Directory -Path $alternateState -Force
     Copy-Item -LiteralPath (Join-Path $state 'device.bin') -Destination $alternateState
     $alternate = [Diagnostics.Process]::Start($info)
@@ -163,9 +163,17 @@ function Test-CrossPathTrayIdentity {
         # This staged executable deliberately fails TUN preflight. The
         # download instructions wrap in the same label as the admin instructions.
         $tunPreflight = '请从 KeyDock 的「软件下载」页下载 Windows 安装包，退出托盘中的助手后安装，再从开始菜单打开 KeyDock Connect'
-        $null = Wait-For 'TUN preflight guidance fits across multiple lines' {
-            [KeyDockWindowProbe]::HasReadableWrappedLabel($alternateWindow,$tunPreflight)
+        try {
+            $null = Wait-For 'visible TUN preflight guidance' {
+                [KeyDockWindowProbe]::Child($alternateWindow,'label',$tunPreflight) -ne [IntPtr]::Zero
+            }
+        } catch {
+            Trace-Smoke ([KeyDockWindowProbe]::VisibleLabels($alternateWindow))
+            throw
+        } finally {
+            [KeyDockWindowProbe]::Capture($alternateWindow,(Join-Path $shots '07-tun-preflight.png'),'设备接入')
         }
+        Trace-Smoke ([KeyDockWindowProbe]::AssertReadableWrappedLabel($alternateWindow,$tunPreflight))
         [KeyDockWindowProbe]::Click([KeyDockWindowProbe]::Child($alternateWindow,'button','退出接入助手'))
         if (-not $alternate.WaitForExit(15000) -or $alternate.ExitCode -ne 0) {
             throw 'The secondary instance failed to exit cleanly.'

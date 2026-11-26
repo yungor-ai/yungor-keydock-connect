@@ -33,6 +33,11 @@ public static class KeyDockWindowProbe {
     [DllImport("user32.dll")] private static extern int GetDlgCtrlID(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+    [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern int DrawText(IntPtr dc,string text,int length,ref Rect rect,uint flags);
+    [DllImport("gdi32.dll")] private static extern IntPtr SelectObject(IntPtr dc,IntPtr obj);
+    [DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr obj);
+    [DllImport("gdi32.dll",CharSet=CharSet.Unicode)] private static extern IntPtr CreateFont(int height,int width,int escape,int orientation,int weight,
+        uint italic,uint underline,uint strikeout,uint charset,uint precision,uint clipping,uint quality,uint pitch,string face);
     [DllImport("user32.dll")] private static extern bool PrintWindow(IntPtr hwnd,IntPtr hdc,uint flags);
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern int GetMenuString(IntPtr menu,uint pos,StringBuilder text,int len,uint byPosition);
     [DllImport("user32.dll")] private static extern int GetSystemMetrics(int index);
@@ -172,20 +177,58 @@ public static class KeyDockWindowProbe {
             if(available+2<required)throw new Exception(String.Format("Label is clipped ({0}px available, {1}px needed): {2}",available,required,text));
         }
     }
-    public static bool HasReadableWrappedLabel(IntPtr window,string text){
+    public static string VisibleLabels(IntPtr window){
+        var labels=new StringBuilder("Visible labels:");
+        EnumChildWindows(window,(h,a)=>{
+            if(Class(h).Equals("static",StringComparison.OrdinalIgnoreCase) && IsWindowVisible(h)){
+                var text=Text(h);
+                if(!String.IsNullOrEmpty(text))labels.AppendFormat(" [{0}]",text);
+            }
+            return true;
+        },IntPtr.Zero);
+        return labels.ToString();
+    }
+    public static string AssertReadableWrappedLabel(IntPtr window,string text){
         IntPtr previous=SetThreadDpiAwarenessContext((IntPtr)(-4));
         try {
             var label=Child(window,"label",text);
-            Rect bounds,parent;
-            if(label==IntPtr.Zero || !GetWindowRect(label,out bounds) || !GetWindowRect(GetParent(label),out parent))return false;
-            int width=bounds.right-bounds.left,height=bounds.bottom-bounds.top;
-            if(width<=0 || height<=0 || bounds.top<parent.top || bounds.bottom>parent.bottom)return false;
-            using(var g=Graphics.FromHwnd(label))
-            using(var font=new Font("Microsoft YaHei UI",10f)){
-                var flags=TextFormatFlags.NoPadding|TextFormatFlags.NoPrefix;
-                var oneLine=TextRenderer.MeasureText(g,text,font,Size.Empty,flags|TextFormatFlags.SingleLine);
-                var wrapped=TextRenderer.MeasureText(g,text,font,new Size(width,Int32.MaxValue),flags|TextFormatFlags.WordBreak);
-                return wrapped.Height>oneLine.Height && height+2>=wrapped.Height && width+2>=wrapped.Width;
+            var parent=GetParent(label);
+            Rect bounds,outer,client;
+            if(label==IntPtr.Zero || !GetWindowRect(label,out bounds) || !GetWindowRect(parent,out outer) || !GetClientRect(label,out client)){
+                throw new Exception("Missing readable Win32 control bounds: "+text);
+            }
+            int dpi=(int)GetDpiForWindow(label);
+            using(var g=Graphics.FromHwnd(label)){
+                var dc=g.GetHdc();
+                IntPtr fallback=IntPtr.Zero,oldFont=IntPtr.Zero;
+                try {
+                    IntPtr font;
+                    if(Send(label,0x31,IntPtr.Zero,IntPtr.Zero,TimedFlags,750,out font)!=IntPtr.Zero && font!=IntPtr.Zero){
+                        oldFont=SelectObject(dc,font); // WM_GETFONT
+                    }
+                    if(oldFont==IntPtr.Zero || oldFont==new IntPtr(-1)){
+                        // A font owned by the separate GUI process may be inaccessible.
+                        fallback=CreateFont(-(10*dpi+36)/72,0,0,0,400,0,0,0,1,4,0,5,34,"Microsoft YaHei UI");
+                        oldFont=SelectObject(dc,fallback);
+                    }
+                    if(oldFont==IntPtr.Zero || oldFont==new IntPtr(-1))throw new Exception("Unable to measure the Win32 label font.");
+                    const uint calculate=0x400|0x800; // DT_CALCRECT | DT_NOPREFIX
+                    var oneLine=client;
+                    var wrapped=client;
+                    int oneLineHeight=DrawText(dc,text,-1,ref oneLine,calculate|0x20); // DT_SINGLELINE
+                    int height=DrawText(dc,text,-1,ref wrapped,calculate|0x10|0x2000); // DT_WORDBREAK | DT_EDITCONTROL
+                    string detail=String.Format("TUN guidance DPI {0}, client {1}x{2}, label y {3}..{4}, outer y {5}..{6}, one line {7}px, wrap needs {8}x{9}",
+                        dpi,client.right,client.bottom,bounds.top,bounds.bottom,outer.top,outer.bottom,oneLineHeight,wrapped.right,height);
+                    if(oneLineHeight<=0 || height<=oneLineHeight || wrapped.right>client.right || height>client.bottom ||
+                        bounds.top<outer.top || bounds.bottom>outer.bottom){
+                        throw new Exception(detail+": label is not fully visible on multiple lines");
+                    }
+                    return detail;
+                } finally {
+                    if(oldFont!=IntPtr.Zero && oldFont!=new IntPtr(-1))SelectObject(dc,oldFont);
+                    if(fallback!=IntPtr.Zero)DeleteObject(fallback);
+                    g.ReleaseHdc(dc);
+                }
             }
         } finally {
             if(previous!=IntPtr.Zero)SetThreadDpiAwarenessContext(previous);
