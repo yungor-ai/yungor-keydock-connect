@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/yungor-ai/yungor-keydock-connect/internal/codex"
@@ -29,6 +30,9 @@ func main() {
 }
 
 func run(args []string) error {
+	if handled, err := proxy.RunWorker(args); handled {
+		return err
+	}
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return err
@@ -47,7 +51,7 @@ func run(args []string) error {
 		return errors.New("未知启动参数")
 	}
 	if !supported {
-		return errors.New("KeyDock 接入助手目前支持 Windows x64")
+		return errors.New("KeyDock 接入助手支持 Windows x64 和 Apple Silicon Mac")
 	}
 	if err = os.MkdirAll(stateDir, 0700); err != nil {
 		return err
@@ -62,7 +66,10 @@ func run(args []string) error {
 	}
 	if !locked {
 		if uninstall {
-			return errors.New("请先从系统托盘退出 KeyDock Connect")
+			if runtime.GOOS == "windows" {
+				return errors.New("请先从系统托盘退出 KeyDock Connect")
+			}
+			return errors.New("请先退出 KeyDock Connect")
 		}
 		return reopenWindow(stateDir)
 	}
@@ -78,7 +85,11 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	mgr := proxy.New(stateDir, filepath.Join(filepath.Dir(exe), "core", "mihomo.exe"))
+	corePath := filepath.Join(filepath.Dir(exe), "core", "mihomo.exe")
+	if runtime.GOOS == "darwin" {
+		corePath = filepath.Join(filepath.Dir(exe), "..", "Resources", "core", "mihomo")
+	}
+	mgr := proxy.New(stateDir, corePath)
 	var log *diagnostics.Log
 	if !uninstall {
 		log = diagnostics.New(stateDir)
@@ -101,7 +112,7 @@ func run(args []string) error {
 		return nil
 	}
 	start = time.Now()
-	controller, err := desktop.NewController(home, stateDir, mgr, desktop.SystemBackend(), log)
+	controller, err := desktop.NewController(home, stateDir, mgr, desktop.SystemBackend(stateDir), log)
 	log.RecordResult("app.enrollment_load", start, err)
 	if err != nil {
 		return err

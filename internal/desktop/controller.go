@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -38,9 +39,14 @@ type Backend struct {
 	TestModel          func(context.Context, connect.Profile) error
 }
 
-func SystemBackend() Backend {
+func SystemBackend(stateDir string) Backend {
 	client := connect.Client{}
-	return Backend{Apply: codex.Apply, Restore: codex.Restore, Configured: codex.Configured, Matches: codex.Matches, Protect: codex.Protect, Unprotect: codex.Unprotect, Launch: launchCodex, Fetch: client.Fetch, TestModel: client.TestModel}
+	return Backend{
+		Apply: codex.Apply, Restore: codex.Restore, Configured: codex.Configured, Matches: codex.Matches,
+		Protect:   func(data []byte) ([]byte, error) { return codex.ProtectForState(stateDir, data) },
+		Unprotect: func(data []byte) ([]byte, error) { return codex.UnprotectForState(stateDir, data) },
+		Launch:    launchCodex, Fetch: client.Fetch, TestModel: client.TestModel,
+	}
 }
 
 // The embedded fields retain the encrypted device.bin layout used in v0.1.
@@ -61,10 +67,11 @@ type Controller struct {
 	diagnostics    *diagnostics.Log
 	checkedAt      time.Time
 	refreshFailed  bool
+	networkChanged chan struct{}
 }
 
 type State struct {
-	ServerURL, Device, Model, Base                      string
+	ServerURL, Device, Model, Base, ProxyAddress        string
 	Paired, Configured, Restorable, Proxy, Subscription bool
 	ProxyMode                                           proxy.Mode
 	SubscriptionCheckedAt                               time.Time
@@ -75,7 +82,7 @@ type State struct {
 type Check struct{ Stage, Status, Message, Hint string }
 
 func NewController(home, stateDir string, proxy Proxy, ops Backend, log *diagnostics.Log) (*Controller, error) {
-	c := &Controller{home: home, stateDir: stateDir, proxy: proxy, ops: ops, diagnostics: log}
+	c := &Controller{home: home, stateDir: stateDir, proxy: proxy, ops: ops, diagnostics: log, networkChanged: make(chan struct{}, 1)}
 	raw, err := os.ReadFile(c.devicePath())
 	if errors.Is(err, fs.ErrNotExist) {
 		return c, nil
@@ -85,7 +92,7 @@ func NewController(home, stateDir string, proxy Proxy, ops Backend, log *diagnos
 	}
 	raw, err = ops.Unprotect(raw)
 	if err != nil || json.Unmarshal(raw, &c.device) != nil || c.device.Key == "" {
-		return nil, errors.New("无法读取此 Windows 用户的设备资料")
+		return nil, errors.New("无法读取当前用户的设备资料")
 	}
 	return c, nil
 }
@@ -94,15 +101,24 @@ func (c *Controller) devicePath() string { return filepath.Join(c.stateDir, "dev
 
 func (c *Controller) snapshot() enrollment { c.mu.RLock(); defer c.mu.RUnlock(); return c.device }
 
+func (c *Controller) ProxyAddress() string {
+	if local, ok := c.proxy.(interface{ ProxyAddress() string }); ok {
+		return local.ProxyAddress()
+	}
+	return ""
+}
+
+func (c *Controller) ActiveProxyMode() proxy.Mode { return c.proxy.ActiveMode() }
+
 func (c *Controller) State() State {
 	c.mu.RLock()
 	p, checkedAt, refreshFailed := c.device, c.checkedAt, c.refreshFailed
 	c.mu.RUnlock()
-	mode := c.proxy.ActiveMode()
+	mode := c.ActiveProxyMode()
 	return State{ServerURL: p.ServerURL, Device: p.DeviceName, Model: p.Model, Base: p.BaseURL, Paired: p.DeviceKey != "" && p.ServerURL != "",
 		Configured: p.Key != "" && c.ops.Matches(c.home, c.stateDir, p.BaseURL, p.Model, p.Key),
 		Restorable: c.ops.Configured(c.home, c.stateDir), Proxy: mode != "", Subscription: p.SubscriptionURL != "",
-		ProxyMode: mode, SubscriptionCheckedAt: checkedAt, SubscriptionUpdatedAt: p.SubscriptionUpdatedAt, SubscriptionRefreshFailed: refreshFailed}
+		ProxyMode: mode, ProxyAddress: c.ProxyAddress(), SubscriptionCheckedAt: checkedAt, SubscriptionUpdatedAt: p.SubscriptionUpdatedAt, SubscriptionRefreshFailed: refreshFailed}
 }
 
 func (c *Controller) ExportDiagnostics(path string) error {
@@ -162,7 +178,7 @@ var errBusy = errors.New("接入助手正在处理其他操作，请稍后重试
 
 // Connect saves the device-scoped reply, applies it, and checks actual model and
 // proxy traffic. Each step is reported independently; a failed model test does
-// not suppress the SS test. Only SetProxy enables the Windows system proxy.
+// not suppress the SS test. Only SetProxyMode enables a sustained proxy.
 func (c *Controller) Connect(ctx context.Context, serverURL, deviceKey string, report func(Check)) error {
 	if !c.operation.TryLock() {
 		return errBusy
@@ -229,6 +245,7 @@ func (c *Controller) Connect(ctx context.Context, serverURL, deviceKey string, r
 			return stepError("device", err)
 		}
 	}
+	c.RecheckNetwork()
 	message := "已获取 " + p.DeviceName + " 的配置"
 	if switched {
 		message += "，原设备的代理已关闭"
@@ -270,15 +287,18 @@ func (c *Controller) Connect(ctx context.Context, serverURL, deviceKey string, r
 }
 
 func proxyClockHint(skew time.Duration) string {
-	const syncWindowsTime = "请在 Windows 时间设置中点「立即同步」，再复测。"
+	syncTime := "请在 Windows 时间设置中点「立即同步」，再复测。"
+	if runtime.GOOS == "darwin" {
+		syncTime = "请在系统设置的「通用 → 日期与时间」中开启自动设置日期与时间，再复测。"
+	}
 	if skew == 0 {
-		return syncWindowsTime + "SS2022 会拒绝两端时钟相差超过 30 秒的连接。"
+		return syncTime + "SS2022 会拒绝两端时钟相差超过 30 秒的连接。"
 	}
 	direction := "快"
 	if skew < 0 {
 		direction = "慢"
 	}
-	return "检测到本机时钟比 KeyDock 服务端" + direction + "了 30 秒以上。" + syncWindowsTime
+	return "检测到本机时钟比 KeyDock 服务端" + direction + "了 30 秒以上。" + syncTime
 }
 
 func (c *Controller) CheckProxyMode(mode proxy.Mode) error { return c.proxy.CheckMode(mode) }
@@ -288,6 +308,7 @@ func (c *Controller) SetProxyMode(on bool, mode proxy.Mode) error {
 		return errBusy
 	}
 	defer c.operation.Unlock()
+	defer c.RecheckNetwork()
 	if !on {
 		return c.recordAction("proxy.disable", func() error {
 			if err := c.proxy.Stop(); err != nil {
@@ -343,6 +364,7 @@ func (c *Controller) refreshActiveSubscription(ctx context.Context) bool {
 	}
 	err := c.recordAction("proxy.subscription_refresh", func() error { return c.proxy.Refresh(ctx, url) })
 	c.noteSubscriptionRefresh(err != nil)
+	c.RecheckNetwork()
 	return true
 }
 

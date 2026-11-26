@@ -14,6 +14,9 @@ import (
 func Protect(data []byte) ([]byte, error)   { return crypt(data, true) }
 func Unprotect(data []byte) ([]byte, error) { return crypt(data, false) }
 
+func ProtectForState(_ string, data []byte) ([]byte, error)   { return Protect(data) }
+func UnprotectForState(_ string, data []byte) ([]byte, error) { return Unprotect(data) }
+
 func crypt(data []byte, seal bool) ([]byte, error) {
 	if uint64(len(data)) > uint64(^uint32(0)) || len(data) == 0 {
 		return nil, errors.New("DPAPI 输入大小无效")

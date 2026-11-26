@@ -47,14 +47,15 @@ type routing struct {
 }
 
 type tunSettings struct {
-	Enable              bool     `yaml:"enable"`
-	Device              string   `yaml:"device"`
-	Stack               string   `yaml:"stack"`
-	AutoRoute           bool     `yaml:"auto-route"`
-	AutoDetectInterface bool     `yaml:"auto-detect-interface"`
-	StrictRoute         bool     `yaml:"strict-route"`
-	DNSMode             string   `yaml:"dns-mode"`
-	DNSHijack           []string `yaml:"dns-hijack"`
+	Enable              bool      `yaml:"enable"`
+	Device              string    `yaml:"device"`
+	Stack               string    `yaml:"stack"`
+	AutoRoute           bool      `yaml:"auto-route"`
+	AutoDetectInterface bool      `yaml:"auto-detect-interface"`
+	StrictRoute         bool      `yaml:"strict-route"`
+	DNSMode             string    `yaml:"dns-mode"`
+	DNSHijack           []string  `yaml:"dns-hijack"`
+	Inet6Address        *[]string `yaml:"inet6-address,omitempty"`
 }
 
 type snifferSettings struct {
@@ -198,11 +199,20 @@ func buildRouting(body []byte, port int, diagnostic bool) ([]byte, error) {
 }
 
 func buildRoutingProfile(body []byte, port int, diagnostic bool, mode Mode) ([]byte, error) {
-	if mode != ModeSystem && mode != ModeTUN {
+	return buildRoutingProfileWithTUN(body, port, diagnostic, mode, nil)
+}
+
+func makeTUNSettings(device string) *tunSettings {
+	return &tunSettings{Enable: true, Device: device, Stack: "mips", AutoRoute: true, AutoDetectInterface: true,
+		DNSMode: "disabled", DNSHijack: []string{}}
+}
+
+func buildRoutingProfileWithTUN(body []byte, port int, diagnostic bool, mode Mode, tun *tunSettings) ([]byte, error) {
+	if mode != ModeSystem && mode != ModeLocal && mode != ModeTUN {
 		return nil, errors.New("代理模式无效")
 	}
 	bad := errors.New("订阅不是受支持的 KeyDock SS2022 分流配置，请重新下载连接包")
-	if len(body) > profileLimit || port < 1 || port > 65535 {
+	if len(body) > profileLimit || port < 0 || port > 65535 || port == 0 && (mode != ModeTUN || tun == nil) {
 		return nil, bad
 	}
 	var cfg routing
@@ -267,13 +277,11 @@ func buildRoutingProfile(body []byte, port int, diagnostic bool, mode Mode) ([]b
 		Sniffer       *snifferSettings `yaml:"sniffer,omitempty"`
 	}{Routing: cfg, Port: port, Bind: "127.0.0.1", Mode: "rule", Log: "silent"}
 	if mode == ModeTUN {
-		// Mihomo checks for usable host IPv6 before adding the IPv6 TUN route.
-		profile.IPv6 = true
-		profile.TUN = &tunSettings{
-			Enable: true, Device: tunDeviceName, Stack: "mips", AutoRoute: true, AutoDetectInterface: true,
-			// Keep Windows DNS and more-specific LAN/VPN routes in place.
-			DNSMode: "disabled", DNSHijack: []string{}, StrictRoute: false,
+		if tun == nil {
+			tun = makeTUNSettings(tunDeviceName)
 		}
+		profile.IPv6 = tun.Inet6Address == nil || len(*tun.Inet6Address) > 0
+		profile.TUN = tun
 		// Use HTTP Host or TLS/QUIC SNI for domain rules without replacing the
 		// resolver's destination IP, which still drives the IP rules and dial.
 		profile.Sniffer = &snifferSettings{

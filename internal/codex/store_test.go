@@ -289,6 +289,23 @@ func TestThreeWayRestoreAndReconfigure(t *testing.T) {
 	}
 }
 
+func TestRelocatedCredentialHelperNeedsResync(t *testing.T) {
+	store, home, dir := testStore(t), t.TempDir(), t.TempDir()
+	if err := store.apply(home, dir, gateway, "model", "test-key"); err != nil {
+		t.Fatal(err)
+	}
+	store.executable = func() (string, error) { return filepath.Join(home, "Moved KeyDock Connect"), nil }
+	if store.matches(home, dir, gateway, "model", "test-key") || !store.configured(home, dir) {
+		t.Fatal("moving the helper should require resync while keeping restore available")
+	}
+	if err := store.apply(home, dir, gateway, "model", "test-key"); err != nil {
+		t.Fatal(err)
+	}
+	if !store.matches(home, dir, gateway, "model", "test-key") {
+		t.Fatal("resync did not update the credential helper path")
+	}
+}
+
 func TestKeepNewTrustAfterFirstInstall(t *testing.T) {
 	store, home, dir := testStore(t), t.TempDir(), t.TempDir()
 	path := filepath.Join(home, "config.toml")

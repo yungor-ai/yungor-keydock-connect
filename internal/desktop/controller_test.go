@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -158,15 +159,19 @@ func TestPartialResultsAndRetry(t *testing.T) {
 
 func TestProxyFailureOffersClockGuidance(t *testing.T) {
 	c, p := deviceTest(t)
+	syncHint := "立即同步"
+	if runtime.GOOS == "darwin" {
+		syncHint = "自动设置日期与时间"
+	}
 	for _, tc := range []struct {
 		name  string
 		skew  time.Duration
 		err   error
 		parts []string
 	}{
-		{"slow clock in customer report", -31324 * time.Millisecond, errors.New("连接中断"), []string{"慢了 30 秒以上", "立即同步"}},
-		{"fast clock", 85 * time.Second, errors.New("连接中断"), []string{"快了 30 秒以上", "立即同步"}},
-		{"clock difference unconfirmed", 0, errors.New("连接中断"), []string{"立即同步", "30 秒"}},
+		{"slow clock in customer report", -31324 * time.Millisecond, errors.New("连接中断"), []string{"慢了 30 秒以上", syncHint}},
+		{"fast clock", 85 * time.Second, errors.New("连接中断"), []string{"快了 30 秒以上", syncHint}},
+		{"clock difference unconfirmed", 0, errors.New("连接中断"), []string{syncHint, "30 秒"}},
 		{"proxy works despite clock difference", -31324 * time.Millisecond, nil, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

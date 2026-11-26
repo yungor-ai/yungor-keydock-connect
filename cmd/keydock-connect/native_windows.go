@@ -114,7 +114,7 @@ func runWindow(dir string, controller *desktop.Controller) error {
 	ui.renderChecks()
 	ui.window.Show() // Starts the form exactly once, after all handlers are ready.
 	enteredLoop = true
-	lifetime, stopRefresh := context.WithCancel(context.Background())
+	lifetime, stopBackground := context.WithCancel(context.Background())
 	go controller.RefreshSubscriptions(lifetime, func() {
 		if lifetime.Err() != nil {
 			return
@@ -125,8 +125,19 @@ func runWindow(dir string, controller *desktop.Controller) error {
 			}
 		})
 	})
+	go controller.WatchNetwork(lifetime, func(result desktop.Check) {
+		if lifetime.Err() != nil {
+			return
+		}
+		app.Synchronize(func() {
+			if lifetime.Err() == nil && !ui.quitting {
+				ui.results[result.Stage] = result
+				ui.renderChecks()
+			}
+		})
+	})
 	app.Run()
-	stopRefresh()
+	stopBackground()
 	if ui.cancel != nil {
 		ui.cancel()
 	}
@@ -234,7 +245,9 @@ func (ui *nativeWindow) exportDiagnostics() {
 func (ui *nativeWindow) startConnect() {
 	server, key := strings.TrimSpace(ui.server.Text()), ui.key.Text()
 	ui.key.SetText("")
-	ui.results = map[string]desktop.Check{}
+	for _, stage := range connectionStages {
+		delete(ui.results, stage.id)
+	}
 	ui.renderChecks()
 	ui.runAction("正在检查连接…", "连接检查已完成", func(ctx context.Context) error {
 		return ui.controller.Connect(ctx, server, key, func(result desktop.Check) {

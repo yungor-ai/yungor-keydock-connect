@@ -3,10 +3,8 @@ package proxy
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"io"
 	"os"
@@ -25,11 +23,6 @@ var tcpTable = windows.NewLazySystemDLL("iphlpapi.dll").NewProc("GetExtendedTcpT
 
 const coreDigest = "5a0231811a80b27477ebdee15684b41946d01afbd2114534e9a4b256125ca147"
 
-var geoFiles = map[string]string{
-	"GeoSite.dat":  "2bdf171e1862b47cc5cd322ee43e5d066d9963025919ebb58dc7891d2b92643e",
-	"geoip.metadb": "4236cf8477d12ceb4837eff39a03a65d5d55a72d3cccdc92e2e36d9cdbd686e3",
-}
-
 type child struct {
 	job     windows.Handle
 	cmd     *exec.Cmd
@@ -43,21 +36,11 @@ type child struct {
 	tunLock windows.Handle
 }
 
-func digestCopy(path string, out io.Writer, expected string) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return errors.New("缺少内置代理核心或离线分流数据，请重新安装")
+func (m *Manager) ProxyAddress() string {
+	if p := m.active.Load(); p != nil && p.mode == ModeSystem {
+		return "127.0.0.1:" + strconv.Itoa(p.port)
 	}
-	defer f.Close()
-	return verifyDigest(f, out, expected)
-}
-
-func verifyDigest(source io.Reader, out io.Writer, expected string) error {
-	h := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(out, h), source); err != nil || hex.EncodeToString(h.Sum(nil)) != expected {
-		return errors.New("代理组件校验失败，请重新安装")
-	}
-	return nil
+	return ""
 }
 
 func openVerifiedCore(path, expected string) (*os.File, error) {

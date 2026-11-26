@@ -1,15 +1,40 @@
-name: Test and build Windows installer
+name: Build and release desktop installers
 
 on:
   pull_request:
   push:
     branches: ["**"]
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  release-tag:
+    if: github.event_name == 'push' && github.ref_type == 'tag' && github.event.created && !github.event.deleted
+    runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.validate.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify tag version and default branch ancestry
+        id: validate
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          version=$(<VERSION)
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo 'The release tag must be v followed by the version in VERSION.' >&2
+            exit 1
+          fi
+          git merge-base --is-ancestor HEAD "refs/remotes/origin/$DEFAULT_BRANCH"
+          printf 'commit=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -21,6 +46,70 @@ jobs:
           go-version-file: go.mod
       - run: go vet ./...
       - run: go test -race ./...
+
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - name: Build and verify macOS arm64 disk image
+        run: bash packaging/build-macos.sh
+      - name: Test with the bundled Apple Silicon proxy core
+        env:
+          KEYDOCK_TEST_CORE: ${{ github.workspace }}/dist/macos/KeyDock Connect.app/Contents/Resources/core/mihomo
+          KEYDOCK_PROFILE_CORE: ${{ github.workspace }}/dist/macos/KeyDock Connect.app/Contents/Resources/core/mihomo
+          KEYDOCK_GEO_DIR: ${{ github.workspace }}/dist/macos/KeyDock Connect.app/Contents/Resources/core
+        run: go test -race ./...
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: KeyDockConnect-macos-arm64
+          path: |
+            dist/macos/KeyDockConnect-macos-arm64.dmg
+            dist/macos/SHA256SUMS.txt
+          if-no-files-found: error
+
+  macos-release:
+    needs: [release-tag, macos]
+    runs-on: macos-15
+    timeout-minutes: 90
+    environment: macos-release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-tag.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+      - name: Sign and notarize the Apple Silicon disk image
+        env:
+          MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
+          MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+          MACOS_NOTARY_KEY_BASE64: ${{ secrets.MACOS_NOTARY_KEY_BASE64 }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+        run: bash packaging/sign-macos-in-ci.sh
+      - name: Test proxy startup against the signed payload
+        shell: bash
+        run: |
+          core="$PWD/dist/macos/KeyDock Connect.app/Contents/Resources/core/mihomo"
+          checksum=$(shasum -a 256 "$core")
+          KEYDOCK_TEST_CORE="$core" KEYDOCK_PROFILE_CORE="$core" KEYDOCK_GEO_DIR="$(dirname "$core")" go test -race -count=1 \
+            -ldflags "-X github.com/yungor-ai/yungor-keydock-connect/internal/proxy.coreDigest=${checksum%% *}" \
+            ./internal/proxy
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: KeyDockConnect-macos-arm64-notarized
+          path: |
+            dist/macos/KeyDockConnect-macos-arm64.dmg
+            dist/macos/SHA256SUMS.txt
+          if-no-files-found: error
 
   windows:
     runs-on: windows-latest
@@ -77,3 +166,45 @@ jobs:
             dist/installer/KeyDockConnect-window.png
             dist/installer/screenshots/*.png
           if-no-files-found: error
+
+  publish:
+    needs: [release-tag, test, windows, macos-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: keydock-release-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-tag.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: KeyDockConnect-windows-x64
+          path: dist/release/windows
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: KeyDockConnect-macos-arm64-notarized
+          path: dist/release/macos
+      - name: Verify and stage both platforms with one checksum manifest
+        run: bash packaging/prepare-release-assets.sh dist/release/windows dist/release/macos dist/release/assets
+      - name: Publish one release for the verified tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_COMMIT: ${{ needs.release-tag.outputs.commit }}
+        run: |
+          tag_ref="refs/tags/$GITHUB_REF_NAME"
+          remote_tag=$(git ls-remote --exit-code origin "$tag_ref" "$tag_ref^{}")
+          tag_commit=$(awk -v ref="$tag_ref" '$2 == ref { direct = $1 } $2 == ref "^{}" { peeled = $1 } END { print peeled ? peeled : direct }' <<< "$remote_tag")
+          if [[ "$tag_commit" != "$RELEASE_COMMIT" ]]; then
+            echo 'Release tag has changed since validation.' >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes \
+            dist/release/assets/KeyDockConnect-Setup-windows-x64.exe \
+            dist/release/assets/KeyDockConnect-windows-x64.zip \
+            dist/release/assets/KeyDockConnect-macos-arm64.dmg \
+            dist/release/assets/SHA256SUMS.txt

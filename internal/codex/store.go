@@ -102,7 +102,13 @@ type storage struct {
 	executable func() (string, error)
 }
 
-var system = storage{Protect, Unprotect, os.Executable}
+func system(stateDir string) storage {
+	return storage{
+		seal:       func(data []byte) ([]byte, error) { return ProtectForState(stateDir, data) },
+		open:       func(data []byte) ([]byte, error) { return UnprotectForState(stateDir, data) },
+		executable: os.Executable,
+	}
+}
 
 const stateName = "codex-state.bin"
 
@@ -195,7 +201,7 @@ func resolveHome(home string) (string, error) {
 }
 
 func Apply(home, stateDir, baseURL, model, key string) error {
-	return system.apply(home, stateDir, baseURL, model, key)
+	return system(stateDir).apply(home, stateDir, baseURL, model, key)
 }
 
 func (store storage) apply(home, dir, base, model, key string) error {
@@ -287,7 +293,7 @@ func (store storage) transition(dir string, s *state, operation pending, next sn
 	return store.save(dir, s)
 }
 
-func Restore(home, stateDir string) error { return system.restore(home, stateDir) }
+func Restore(home, stateDir string) error { return system(stateDir).restore(home, stateDir) }
 func (store storage) restore(home, dir string) error {
 	home, err := resolveHome(home)
 	if err != nil {
@@ -310,7 +316,7 @@ func (store storage) restore(home, dir string) error {
 	})
 }
 
-func Credential(stateDir string) (string, error) { return system.credential(stateDir) }
+func Credential(stateDir string) (string, error) { return system(stateDir).credential(stateDir) }
 func (store storage) credential(dir string) (string, error) {
 	var key string
 	err := underLock(dir, func() error {
@@ -327,7 +333,7 @@ func (store storage) credential(dir string) (string, error) {
 	return key, err
 }
 
-func Configured(home, stateDir string) bool { return system.configured(home, stateDir) }
+func Configured(home, stateDir string) bool { return system(stateDir).configured(home, stateDir) }
 func (store storage) configured(home, dir string) bool {
 	home, err := resolveHome(home)
 	if err != nil {
@@ -362,7 +368,7 @@ func (store storage) configured(home, dir string) bool {
 // Matches reports whether the current imported profile can use the live provider
 // and credential helper, even if Codex has recorded new unrelated settings.
 func Matches(home, stateDir, baseURL, model, key string) bool {
-	return system.matches(home, stateDir, baseURL, model, key)
+	return system(stateDir).matches(home, stateDir, baseURL, model, key)
 }
 
 func (store storage) matches(home, dir, base, model, key string) bool {
@@ -373,6 +379,10 @@ func (store storage) matches(home, dir, base, model, key string) bool {
 	if _, err := os.Stat(filepath.Join(dir, stateName)); err != nil {
 		return false
 	}
+	executable, err := store.executable()
+	if err != nil {
+		return false
+	}
 	match := false
 	err = underLock(dir, func() error {
 		s, err := store.load(dir, home)
@@ -380,7 +390,7 @@ func (store storage) matches(home, dir, base, model, key string) bool {
 			return err
 		}
 		active := s.Active
-		if active.Key != key || active.BaseURL != base || active.Model != model {
+		if active.Key != key || active.BaseURL != base || active.Model != model || active.Command != executable {
 			return nil
 		}
 		cfg, err := readSnapshot(filepath.Join(home, "config.toml"))

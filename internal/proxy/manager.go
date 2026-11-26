@@ -15,6 +15,7 @@ type Mode string
 
 const (
 	ModeSystem Mode = "system"
+	ModeLocal  Mode = "local"
 	ModeTUN    Mode = "tun"
 )
 

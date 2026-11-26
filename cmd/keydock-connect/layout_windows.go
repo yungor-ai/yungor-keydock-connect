@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"slices"
 
 	"github.com/tailscale/walk"
 	d "github.com/tailscale/walk/declarative"
@@ -35,12 +36,17 @@ type checkStage struct {
 	id, title, description string
 }
 
-var stages = []checkStage{
+var connectionStages = []checkStage{
 	{"device", "设备授权", "从服务器获取设备配置"},
 	{"codex", "Codex 配置", "写入本机 Codex 配置"},
 	{"model", "模型连通", "发送模型测试请求"},
 	{"proxy", "代理连通", "通过 SS 节点测试 HTTPS 请求"},
 }
+
+var stages = slices.Concat(connectionStages, []checkStage{
+	{"google", "Google 连通", "检测 google.com 的访问状态"},
+	{"egress", "出口 IP", "检测公网 IP 并与 KeyDock 服务器比较"},
+})
 
 type checkRow struct {
 	status *walk.Label
@@ -109,6 +115,8 @@ func (ui *nativeWindow) build(icon *walk.Icon) error {
 		d.Composite{Layout: d.HBox{MarginsZero: true, Spacing: 8, Alignment: d.AlignHNearVCenter}, Children: []d.Widget{
 			heading("连接检查"),
 			d.HSpacer{},
+			d.PushButton{Text: "重新检测网络", UseLayoutFlags: true,
+				MinSize: d.Size{Width: 116, Height: 28}, OnClicked: ui.controller.RecheckNetwork},
 			d.PushButton{AssignTo: &ui.export, Text: exportDiagnosticsLabel, UseLayoutFlags: true,
 				MinSize: d.Size{Width: 126, Height: 28}, OnClicked: ui.exportDiagnostics},
 		}},
@@ -160,7 +168,7 @@ func (ui *nativeWindow) build(icon *walk.Icon) error {
 	}
 	err := (d.MainWindow{
 		AssignTo: &ui.window, Title: "KeyDock Connect v" + keydockconnect.Version(), Visible: false, Icon: icon,
-		Font: uiFont(10, false), Size: d.Size{Width: 680, Height: 570}, MinSize: d.Size{Width: 520, Height: 475},
+		Font: uiFont(10, false), Size: d.Size{Width: 680, Height: 638}, MinSize: d.Size{Width: 520, Height: 543},
 		Layout: d.VBox{MarginsZero: true, SpacingZero: true}, Children: []d.Widget{header, body, footer},
 	}).Create()
 	if err != nil {
@@ -176,6 +184,7 @@ func (ui *nativeWindow) build(icon *walk.Icon) error {
 func (ui *nativeWindow) renderChecks() {
 	for i, stage := range stages {
 		status, detail, color := "待检查", stage.description, ui.colors.muted
+		detailColor := ui.colors.muted
 		if result, ok := ui.results[stage.id]; ok {
 			detail = result.Message
 			switch result.Status {
@@ -185,13 +194,27 @@ func (ui *nativeWindow) renderChecks() {
 				status, color = "完成", ui.colors.success
 			case "failed":
 				status, color = "失败", ui.colors.danger
+			case "warning":
+				status, color = "不一致", ui.colors.danger
+				detailColor = ui.colors.danger
 			case "skipped":
 				status = "跳过"
+			}
+			switch {
+			case stage.id == "google" && result.Status == "ok":
+				status = "可访问"
+			case stage.id == "google" && result.Status == "failed":
+				status = "无法访问"
+			case stage.id == "egress" && result.Status == "ok":
+				status = "一致"
+			case stage.id == "egress" && result.Status == "skipped":
+				status = "未校验"
 			}
 		}
 		row := &ui.rows[i]
 		row.status.SetTextColor(color)
 		row.status.SetText(status)
+		row.detail.SetTextColor(detailColor)
 		row.detail.SetText(detail)
 		row.detail.SetToolTipText(detail)
 	}
