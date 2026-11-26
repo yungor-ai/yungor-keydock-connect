@@ -274,7 +274,7 @@ func buildRoutingProfileWithTUN(body []byte, port int, diagnostic bool, mode Mod
 		Mode          string           `yaml:"mode"`
 		Log           string           `yaml:"log-level"`
 		GeoAutoUpdate bool             `yaml:"geo-auto-update"`
-		IPv6          bool             `yaml:"ipv6,omitempty"`
+		IPv6          *bool            `yaml:"ipv6,omitempty"`
 		TUN           *tunSettings     `yaml:"tun,omitempty"`
 		Sniffer       *snifferSettings `yaml:"sniffer,omitempty"`
 	}{Routing: cfg, Port: port, Bind: "127.0.0.1", Mode: "rule", Log: "silent"}
@@ -283,8 +283,13 @@ func buildRoutingProfileWithTUN(body []byte, port int, diagnostic bool, mode Mod
 			tun = makeTUNSettings(tunDeviceName)
 			// Apply the same MTU as Clash Verge Rev instead of Mihomo's 9000-byte default.
 			tun.MTU = windowsTUNMTU
+			// The SS relay needs IPv4 destinations. Reject IPv6 on Windows while
+			// TUN is active so clients can fall back without bypassing the tunnel.
+			tun.StrictRoute = true
+			profile.IPv6 = new(false)
+		} else if tun.Inet6Address == nil || len(*tun.Inet6Address) > 0 {
+			profile.IPv6 = new(true)
 		}
-		profile.IPv6 = tun.Inet6Address == nil || len(*tun.Inet6Address) > 0
 		profile.TUN = tun
 		// Use HTTP Host or TLS/QUIC SNI for domain rules without replacing the
 		// resolver's destination IP, which still drives the IP rules and dial.

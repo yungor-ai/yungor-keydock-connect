@@ -172,6 +172,25 @@ public static class KeyDockWindowProbe {
             if(available+2<required)throw new Exception(String.Format("Label is clipped ({0}px available, {1}px needed): {2}",available,required,text));
         }
     }
+    public static bool HasReadableWrappedLabel(IntPtr window,string text){
+        IntPtr previous=SetThreadDpiAwarenessContext((IntPtr)(-4));
+        try {
+            var label=Child(window,"label",text);
+            Rect bounds,parent;
+            if(label==IntPtr.Zero || !GetWindowRect(label,out bounds) || !GetWindowRect(GetParent(label),out parent))return false;
+            int width=bounds.right-bounds.left,height=bounds.bottom-bounds.top;
+            if(width<=0 || height<=0 || bounds.top<parent.top || bounds.bottom>parent.bottom)return false;
+            using(var g=Graphics.FromHwnd(label))
+            using(var font=new Font("Microsoft YaHei UI",10f)){
+                var flags=TextFormatFlags.NoPadding|TextFormatFlags.NoPrefix;
+                var oneLine=TextRenderer.MeasureText(g,text,font,Size.Empty,flags|TextFormatFlags.SingleLine);
+                var wrapped=TextRenderer.MeasureText(g,text,font,new Size(width,Int32.MaxValue),flags|TextFormatFlags.WordBreak);
+                return wrapped.Height>oneLine.Height && height+2>=wrapped.Height && width+2>=wrapped.Width;
+            }
+        } finally {
+            if(previous!=IntPtr.Zero)SetThreadDpiAwarenessContext(previous);
+        }
+    }
     public static void AssertAlignedChecks(IntPtr window){
         string[] stages={"设备授权","Codex 配置","模型连通","代理连通"};
         int first=-1;

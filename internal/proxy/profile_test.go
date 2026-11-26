@@ -85,10 +85,10 @@ func TestRejectsInvalidFeedWithoutLeakingContents(t *testing.T) {
 }
 
 func TestTUNProfilePreservesRoutingAndUsesTrustedRuntimeSettings(t *testing.T) {
-	source := []byte(fixture + `tun: {enable: false, device: "untrusted-device", strict-route: true, dns-hijack: ["any:53"], mtu: 9000}
+	source := []byte(fixture + `tun: {enable: false, device: "untrusted-device", strict-route: false, dns-hijack: ["any:53"], mtu: 9000}
 dns: {enable: true, nameserver: ["https://untrusted.invalid/dns-query"]}
 sniffer: {enable: false, override-destination: true}
-ipv6: false
+ipv6: true
 interface-name: untrusted-interface
 external-controller: 0.0.0.0:9999
 allow-lan: true
@@ -113,12 +113,12 @@ allow-lan: true
 			t.Fatalf("feed runtime setting %q survived sanitization", key)
 		}
 	}
-	if tun["ipv6"] != true {
-		t.Fatal("TUN disabled host IPv6 support")
+	if tun["ipv6"] != false {
+		t.Fatal("Windows TUN must explicitly disable IPv6 because Mihomo defaults to enabled")
 	}
 	wantTUN := map[string]any{
 		"enable": true, "device": "KeyDockTun", "stack": "mips", "auto-route": true,
-		"auto-detect-interface": true, "strict-route": false, "dns-mode": "disabled", "dns-hijack": []any{}, "mtu": 1500,
+		"auto-detect-interface": true, "strict-route": true, "dns-mode": "disabled", "dns-hijack": []any{}, "mtu": 1500,
 	}
 	if !reflect.DeepEqual(tun["tun"], wantTUN) {
 		t.Fatalf("unexpected TUN settings: %v", tun["tun"])

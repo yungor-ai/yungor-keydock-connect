@@ -134,6 +134,9 @@ function Test-CrossPathTrayIdentity {
     $info.UseShellExecute = $false
     $info.EnvironmentVariables['APPDATA'] = Join-Path $testRoot 'tray-second-appdata'
     $info.EnvironmentVariables['CODEX_HOME'] = Join-Path $testRoot 'tray-second-codex'
+    $alternateState = Join-Path $info.EnvironmentVariables['APPDATA'] 'Yungor\KeyDockConnect'
+    $null = New-Item -ItemType Directory -Path $alternateState -Force
+    Copy-Item -LiteralPath (Join-Path $state 'device.bin') -Destination $alternateState
     $alternate = [Diagnostics.Process]::Start($info)
     try {
         $alternateWindow = Wait-For 'secondary native window at a different executable path' {
@@ -155,6 +158,14 @@ function Test-CrossPathTrayIdentity {
         $null = Wait-For 'hidden secondary window after close' { -not [KeyDockWindowProbe]::IsWindowVisible($alternateWindow) }
         [KeyDockWindowProbe]::SelectTray($alternateSink)
         $null = Wait-For 'secondary window reopened through its tray' { [KeyDockWindowProbe]::IsWindowVisible($alternateWindow) }
+        [KeyDockWindowProbe]::SelectMode($alternateWindow,1)
+        [KeyDockWindowProbe]::Click([KeyDockWindowProbe]::Child($alternateWindow,'button','启用 TUN'))
+        # This staged executable deliberately fails TUN preflight. The
+        # download instructions wrap in the same label as the admin instructions.
+        $tunPreflight = '请从 KeyDock 的「软件下载」页下载 Windows 安装包，退出托盘中的助手后安装，再从开始菜单打开 KeyDock Connect'
+        $null = Wait-For 'TUN preflight guidance fits across multiple lines' {
+            [KeyDockWindowProbe]::HasReadableWrappedLabel($alternateWindow,$tunPreflight)
+        }
         [KeyDockWindowProbe]::Click([KeyDockWindowProbe]::Child($alternateWindow,'button','退出接入助手'))
         if (-not $alternate.WaitForExit(15000) -or $alternate.ExitCode -ne 0) {
             throw 'The secondary instance failed to exit cleanly.'
@@ -207,7 +218,6 @@ try {
         throw 'The native window still contains the Open Codex button.'
     }
     [KeyDockWindowProbe]::Capture($handle,(Join-Path $shots '01-first-launch.png'),'设备接入')
-    Test-CrossPathTrayIdentity
     [KeyDockWindowProbe]::SelectTray($initialSink)
     [KeyDockWindowProbe]::Enter($serverField,$origin)
     [KeyDockWindowProbe]::Click([KeyDockWindowProbe]::Child($handle,'button','检查更新'))
@@ -325,6 +335,7 @@ try {
     [KeyDockWindowProbe]::AssertReadableLabel($handle,'演示工作站 · synthetic-model')
     [KeyDockWindowProbe]::AssertReadableLabel($handle,'启用后，使用系统代理的应用流量将按订阅规则分流。')
     Copy-Item $connectedShot $shot -Force
+    Test-CrossPathTrayIdentity
 
     $internetSettings = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
     $beforeSelection = Get-ItemProperty $internetSettings

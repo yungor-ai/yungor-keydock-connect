@@ -190,12 +190,9 @@ func (p *child) tunReady() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	var ipv4Assigned, ipv6Assigned bool
+	var ipv4Assigned bool
 	for _, address := range addresses {
 		ipv4Assigned = ipv4Assigned || address.String() == "198.18.0.1/30"
-		if ipnet, ok := address.(*net.IPNet); ok && ipnet.IP.To4() == nil && !ipnet.IP.IsLinkLocalUnicast() {
-			ipv6Assigned = true
-		}
 	}
 	p.tunLUID = luid
 	routes, err := tunRoutes(luid)
@@ -207,7 +204,9 @@ func (p *child) tunReady() (bool, error) {
 		ipv4Route = ipv4Route || route.DestinationPrefix.Prefix.Family == windows.AF_INET
 		ipv6Route = ipv6Route || route.DestinationPrefix.Prefix.Family == windows.AF_INET6
 	}
-	if !ipv4Assigned || !ipv4Route || ipv6Assigned && !ipv6Route {
+	// A reused adapter can retain an IPv6 address from an older version.
+	// Only verify IPv6 route selection when this session installed a route.
+	if !ipv4Assigned || !ipv4Route {
 		return false, nil
 	}
 	selected, err := getBestInterface()

@@ -163,7 +163,8 @@ func (ui *nativeWindow) build(icon *walk.Icon) error {
 	footer := d.Composite{
 		Background: colors.card, Layout: d.HBox{Margins: d.Margins{Left: 20, Top: 8, Right: 16, Bottom: 8}, Spacing: 8},
 		Children: []d.Widget{
-			d.TextLabel{AssignTo: &ui.message, NoPrefix: true, StretchFactor: 2, MinSize: d.Size{Width: 125}, Text: "关闭窗口可收至系统托盘。", TextAlignment: d.AlignHNearVCenter, TextColor: colors.muted},
+			// Top-aligned text lets Walk's native label use the full wrapped height.
+			d.TextLabel{AssignTo: &ui.message, NoPrefix: true, StretchFactor: 2, MinSize: d.Size{Width: 125}, Text: "关闭窗口可收至系统托盘。", TextColor: colors.muted},
 			d.PushButton{AssignTo: &ui.restore, Text: "恢复原 Codex 配置", UseLayoutFlags: true, MinSize: d.Size{Height: 28}, OnClicked: func() {
 				ui.runAction("正在恢复 Codex 配置…", "已恢复原 Codex 配置", func(context.Context) error { return ui.controller.Restore() })
 			}},
