@@ -31,7 +31,6 @@ public static class KeyDockWindowProbe {
     [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr hwnd,uint command);
     [DllImport("user32.dll")] private static extern IntPtr GetParent(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern int GetDlgCtrlID(IntPtr hwnd);
-    [DllImport("user32.dll")] private static extern IntPtr GetDlgItem(IntPtr hwnd,int id);
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hwnd,uint flags);
@@ -194,7 +193,6 @@ public static class KeyDockWindowProbe {
             if(previous!=IntPtr.Zero)SetThreadDpiAwarenessContext(previous);
         }
     }
-    public static void ConfirmDialog(IntPtr dialog){Click(GetDlgItem(dialog,1));}
     private static bool Contains(Rect outer,Rect inner){
         return inner.left>=outer.left && inner.top>=outer.top && inner.right<=outer.right && inner.bottom<=outer.bottom;
     }

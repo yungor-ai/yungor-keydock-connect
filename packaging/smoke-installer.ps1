@@ -169,7 +169,7 @@ function Test-CrossPathTrayIdentity {
         }
         [KeyDockWindowProbe]::Capture($tunDialog,(Join-Path $shots '07-tun-preflight.png'),'')
         Trace-Smoke ([KeyDockWindowProbe]::AssertDialogMessage($tunDialog,$alternateWindow,$tunPreflight))
-        [KeyDockWindowProbe]::ConfirmDialog($tunDialog)
+        [KeyDockWindowProbe]::HideViaClose($tunDialog)
         $null = Wait-For 'TUN warning dismissed' { -not [KeyDockWindowProbe]::IsWindowVisible($tunDialog) }
         [KeyDockWindowProbe]::Click([KeyDockWindowProbe]::Child($alternateWindow,'button','退出接入助手'))
         if (-not $alternate.WaitForExit(15000) -or $alternate.ExitCode -ne 0) {
