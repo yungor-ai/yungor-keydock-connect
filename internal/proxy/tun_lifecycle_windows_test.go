@@ -307,8 +307,20 @@ rules:
 		t.Fatalf("IPv4-only TUN forwarded unexpected destination %q", address)
 	default:
 	}
-	if err := request(hostname, nil, ipv6, ipv4); err != nil {
-		t.Fatalf("TUN could not fall back to IPv4 through the SS2022 exit: %v", err)
+	// The worker can publish routes before its packet handler accepts requests.
+	// Allow that startup transition, while failing any rejected request that
+	// actually made it to the exit instead of hiding a destination error.
+	deadline := time.Now().Add(4 * time.Second)
+	for err := request(hostname, nil, ipv6, ipv4); err != nil; err = request(hostname, nil, ipv6, ipv4) {
+		select {
+		case address := <-seen:
+			t.Fatalf("TUN sent %q to the IPv4-only exit, but HTTPS failed: %v", address, err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("TUN could not fall back to IPv4 through the SS2022 exit: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 	checkExit(ipv4)
 	stopPeer()
