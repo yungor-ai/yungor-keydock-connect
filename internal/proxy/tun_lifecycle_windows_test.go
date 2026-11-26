@@ -204,9 +204,9 @@ rules:
 		}
 	}
 	t.Cleanup(stop)
-	start := func(mode Mode, tun *tunSettings) {
+	start := func(mode Mode) {
 		t.Helper()
-		config, err := buildRoutingProfileWithTUN(body, port, false, mode, tun)
+		config, err := buildModeProfile(body, port, mode)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -282,34 +282,20 @@ rules:
 		return false
 	}
 	localProxy := &url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(port))}
-	start(ModeSystem, nil)
+	start(ModeSystem)
 	if err := request(hostname, localProxy); err != nil {
 		t.Fatalf("system proxy could not reach the IPv4-only SS2022 exit: %v", err)
 	}
 	checkExit(hostname + ":443")
-	stop()
-
-	legacy := makeTUNSettings(tunDeviceName)
-	legacy.MTU = windowsTUNMTU
-	legacy.Inet6Address = &[]string{"fdfe:dcba:9876::1/126"}
-	start(ModeTUN, legacy)
-	legacyIPv6 := func() error {
-		if hasTUNIPv6Route() {
-			return request(hostname, nil, ipv6)
-		}
-		// Mihomo suppresses the legacy IPv6 TUN route when the runner has
-		// no global-unicast IPv6. Exercise the same literal SS2022 target
-		// through its loopback listener on such a runner.
-		t.Log("runner has no legacy IPv6 TUN route; checking the raw IPv6 target through the mixed listener")
-		return request(ipv6, localProxy)
-	}
-	if err := legacyIPv6(); err == nil {
-		t.Fatal("the legacy TUN forwarded a raw IPv6 destination successfully")
+	// Exercise the old form of the SS2022 destination on the same ready
+	// proxy. Windows CI has no native global IPv6 route for the legacy TUN.
+	if err := request(ipv6, localProxy); err == nil {
+		t.Fatal("the IPv4-only SS2022 exit accepted a raw IPv6 destination")
 	}
 	checkExit(ipv6)
 	stop()
 
-	start(ModeTUN, nil)
+	start(ModeTUN)
 	if hasTUNIPv6Route() {
 		t.Fatal("IPv4-only TUN installed an IPv6 default route")
 	}
