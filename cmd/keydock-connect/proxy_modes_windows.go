@@ -71,7 +71,10 @@ func (ui *nativeWindow) renderProxy() {
 		}
 	}
 	visibility := int32(win.SW_HIDE)
-	if ui.state.Subscription {
+	hintColor := ui.colors.muted
+	if ui.proxyError != "" {
+		hint, hintColor = ui.proxyError, ui.colors.danger
+	} else if ui.state.Subscription {
 		lastUpdate := "尚未更新"
 		if updatedAt := ui.state.SubscriptionUpdatedAt; !updatedAt.IsZero() {
 			lastUpdate = updatedAt.Local().Format("2006-01-02 15:04:05")
@@ -81,6 +84,7 @@ func (ui *nativeWindow) renderProxy() {
 	}
 	// Set the label's own visibility so refreshes work while hidden in the tray.
 	win.ShowWindow(ui.proxyUpdatedAt.Handle(), visibility)
+	ui.proxyHint.SetTextColor(hintColor)
 	ui.proxyHint.SetText(hint)
 	ui.proxyModes.SetEnabled(idle)
 	ui.proxy.SetText(proxyAction(selected, current))
@@ -91,7 +95,20 @@ func (ui *nativeWindow) toggleProxy() {
 	mode, current := ui.selectedProxyMode(), ui.state.ProxyMode
 	on := mode != current
 	action := proxyAction(mode, current)
-	ui.runAction("正在"+action+"…", "已"+action, func(context.Context) error {
+	ui.proxyError = ""
+	ui.runTask("正在"+action+"…", func(context.Context) error {
 		return ui.controller.SetProxyMode(on, mode)
+	}, func(err error) {
+		if err != nil {
+			if mode != proxy.ModeTUN && current != proxy.ModeTUN {
+				ui.setMessage(err.Error(), ui.colors.danger)
+				return
+			}
+			ui.proxyError = err.Error()
+			ui.renderProxy()
+			ui.setMessage("", ui.colors.muted)
+			return
+		}
+		ui.setMessage("已"+action, ui.colors.success)
 	})
 }

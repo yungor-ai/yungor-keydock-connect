@@ -33,6 +33,8 @@ public static class KeyDockWindowProbe {
     [DllImport("user32.dll")] private static extern int GetDlgCtrlID(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+    [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hwnd,uint flags);
+    [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern bool GetMonitorInfo(IntPtr monitor,ref MonitorInfo info);
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern int DrawText(IntPtr dc,string text,int length,ref Rect rect,uint flags);
     [DllImport("gdi32.dll")] private static extern IntPtr SelectObject(IntPtr dc,IntPtr obj);
     [DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr obj);
@@ -105,6 +107,7 @@ public static class KeyDockWindowProbe {
     }
     [StructLayout(LayoutKind.Sequential)] private struct TrayItem {public uint size; public IntPtr window; public uint id; public Guid guid;}
     [StructLayout(LayoutKind.Sequential)] private struct Rect {public int left,top,right,bottom;}
+    [StructLayout(LayoutKind.Sequential)] private struct MonitorInfo {public uint size;public Rect monitor,work;public uint flags;}
     [StructLayout(LayoutKind.Sequential)] private struct Input {public uint type;public InputData data;}
     [StructLayout(LayoutKind.Explicit)] private struct InputData {
         [FieldOffset(0)] public MouseInput mouse; // Supplies the native INPUT union size.
@@ -192,10 +195,19 @@ public static class KeyDockWindowProbe {
         IntPtr previous=SetThreadDpiAwarenessContext((IntPtr)(-4));
         try {
             var label=Child(window,"label",text);
-            var parent=GetParent(label);
-            Rect bounds,outer,client;
-            if(label==IntPtr.Zero || !GetWindowRect(label,out bounds) || !GetWindowRect(parent,out outer) || !GetClientRect(label,out client)){
+            Rect bounds,client;
+            if(label==IntPtr.Zero || !GetWindowRect(label,out bounds) || !GetClientRect(label,out client)){
                 throw new Exception("Missing readable Win32 control bounds: "+text);
+            }
+            for(var parent=GetParent(label);parent!=IntPtr.Zero;parent=GetParent(parent)){
+                Rect outer;
+                if(!GetWindowRect(parent,out outer) || !Contains(outer,bounds))throw new Exception("TUN guidance is clipped by an ancestor window.");
+                if(parent==window)break;
+            }
+            var monitor=new MonitorInfo{size=(uint)Marshal.SizeOf(typeof(MonitorInfo))};
+            if(!GetMonitorInfo(MonitorFromWindow(window,2),ref monitor) || !Contains(monitor.work,bounds)){
+                throw new Exception(String.Format("TUN guidance y {0}..{1} is outside the monitor work area y {2}..{3}.",
+                    bounds.top,bounds.bottom,monitor.work.top,monitor.work.bottom));
             }
             int dpi=(int)GetDpiForWindow(label);
             using(var g=Graphics.FromHwnd(label)){
@@ -217,11 +229,10 @@ public static class KeyDockWindowProbe {
                     var wrapped=client;
                     int oneLineHeight=DrawText(dc,text,-1,ref oneLine,calculate|0x20); // DT_SINGLELINE
                     int height=DrawText(dc,text,-1,ref wrapped,calculate|0x10|0x2000); // DT_WORDBREAK | DT_EDITCONTROL
-                    string detail=String.Format("TUN guidance DPI {0}, client {1}x{2}, label y {3}..{4}, outer y {5}..{6}, one line {7}px, wrap needs {8}x{9}",
-                        dpi,client.right,client.bottom,bounds.top,bounds.bottom,outer.top,outer.bottom,oneLineHeight,wrapped.right,height);
-                    if(oneLineHeight<=0 || height<=oneLineHeight || wrapped.right>client.right || height>client.bottom ||
-                        bounds.top<outer.top || bounds.bottom>outer.bottom){
-                        throw new Exception(detail+": label is not fully visible on multiple lines");
+                    string detail=String.Format("TUN guidance DPI {0}, client {1}x{2}, label y {3}..{4}, monitor work y {5}..{6}, one line {7}px, wrap needs {8}x{9}",
+                        dpi,client.right,client.bottom,bounds.top,bounds.bottom,monitor.work.top,monitor.work.bottom,oneLineHeight,wrapped.right,height);
+                    if(height<=0 || wrapped.right>client.right || height>client.bottom){
+                        throw new Exception(detail+": label is not fully visible");
                     }
                     return detail;
                 } finally {
@@ -233,6 +244,9 @@ public static class KeyDockWindowProbe {
         } finally {
             if(previous!=IntPtr.Zero)SetThreadDpiAwarenessContext(previous);
         }
+    }
+    private static bool Contains(Rect outer,Rect inner){
+        return inner.left>=outer.left && inner.top>=outer.top && inner.right<=outer.right && inner.bottom<=outer.bottom;
     }
     public static void AssertAlignedChecks(IntPtr window){
         string[] stages={"设备授权","Codex 配置","模型连通","代理连通"};

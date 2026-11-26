@@ -37,7 +37,7 @@ func (m *Manager) CheckMode(mode Mode) error {
 			return err
 		}
 		if !windows.GetCurrentProcessToken().IsElevated() {
-			return errors.New("请从托盘退出助手，在开始菜单搜索 KeyDock Connect，右键选择「更多」→「以管理员身份运行」，并使用当前 Windows 账号")
+			return errors.New("启用 TUN 需要管理员权限。请从托盘退出助手，在开始菜单右键 KeyDock Connect，选择「更多」→「以管理员身份运行」，并使用当前 Windows 账号")
 		}
 		return nil
 	default:

@@ -37,6 +37,7 @@ type nativeWindow struct {
 	export, timeSettings       *walk.PushButton
 	downloads, checkUpdates    *walk.PushButton
 	state                      desktop.State
+	proxyError                 string
 	cleaned                    bool
 	results                    map[string]desktop.Check
 	cancel                     context.CancelFunc
@@ -59,7 +60,10 @@ func runWindow(dir string, controller *desktop.Controller) error {
 	if err := ui.build(icon); err != nil {
 		return err
 	}
-	ui.proxyModes.CurrentIndexChanged().Attach(ui.renderProxy)
+	ui.proxyModes.CurrentIndexChanged().Attach(func() {
+		ui.proxyError = ""
+		ui.renderProxy()
+	})
 	// The Walk layout worker closes its quit channel when App.Exit cancels
 	// the app context. A form may only be disposed while that worker is alive.
 	enteredLoop := false
