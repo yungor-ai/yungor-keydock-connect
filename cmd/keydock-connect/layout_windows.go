@@ -153,7 +153,7 @@ func (ui *nativeWindow) build(icon *walk.Icon) error {
 					MaxSize: d.Size{Width: 110}, OnClicked: ui.toggleProxy},
 			}},
 			d.Label{AssignTo: &ui.proxyUpdatedAt, Font: uiFont(10, true), TextColor: colors.ink},
-			d.TextLabel{AssignTo: &ui.proxyHint, NoPrefix: true, MinSize: d.Size{Width: 150}, TextColor: colors.muted},
+			d.TextLabel{AssignTo: &ui.proxyHint, MinSize: d.Size{Width: 150}, TextColor: colors.muted},
 		},
 	}
 	body := d.Composite{Background: colors.page,

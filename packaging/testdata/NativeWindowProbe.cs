@@ -31,15 +31,11 @@ public static class KeyDockWindowProbe {
     [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr hwnd,uint command);
     [DllImport("user32.dll")] private static extern IntPtr GetParent(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern int GetDlgCtrlID(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern IntPtr GetDlgItem(IntPtr hwnd,int id);
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hwnd,uint flags);
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern bool GetMonitorInfo(IntPtr monitor,ref MonitorInfo info);
-    [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern int DrawText(IntPtr dc,string text,int length,ref Rect rect,uint flags);
-    [DllImport("gdi32.dll")] private static extern IntPtr SelectObject(IntPtr dc,IntPtr obj);
-    [DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr obj);
-    [DllImport("gdi32.dll",CharSet=CharSet.Unicode)] private static extern IntPtr CreateFont(int height,int width,int escape,int orientation,int weight,
-        uint italic,uint underline,uint strikeout,uint charset,uint precision,uint clipping,uint quality,uint pitch,string face);
     [DllImport("user32.dll")] private static extern bool PrintWindow(IntPtr hwnd,IntPtr hdc,uint flags);
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern int GetMenuString(IntPtr menu,uint pos,StringBuilder text,int len,uint byPosition);
     [DllImport("user32.dll")] private static extern int GetSystemMetrics(int index);
@@ -180,71 +176,25 @@ public static class KeyDockWindowProbe {
             if(available+2<required)throw new Exception(String.Format("Label is clipped ({0}px available, {1}px needed): {2}",available,required,text));
         }
     }
-    public static string VisibleLabels(IntPtr window){
-        var labels=new StringBuilder("Visible labels:");
-        EnumChildWindows(window,(h,a)=>{
-            if(Class(h).Equals("static",StringComparison.OrdinalIgnoreCase) && IsWindowVisible(h)){
-                var text=Text(h);
-                if(!String.IsNullOrEmpty(text))labels.AppendFormat(" [{0}]",text);
-            }
-            return true;
-        },IntPtr.Zero);
-        return labels.ToString();
-    }
-    public static string AssertReadableWrappedLabel(IntPtr window,string text){
+    public static string AssertDialogMessage(IntPtr dialog,IntPtr owner,string text){
         IntPtr previous=SetThreadDpiAwarenessContext((IntPtr)(-4));
         try {
-            var label=Child(window,"label",text);
-            Rect bounds,client;
-            if(label==IntPtr.Zero || !GetWindowRect(label,out bounds) || !GetClientRect(label,out client)){
-                throw new Exception("Missing readable Win32 control bounds: "+text);
-            }
-            for(var parent=GetParent(label);parent!=IntPtr.Zero;parent=GetParent(parent)){
-                Rect outer;
-                if(!GetWindowRect(parent,out outer) || !Contains(outer,bounds))throw new Exception("TUN guidance is clipped by an ancestor window.");
-                if(parent==window)break;
+            var label=Child(dialog,"label",text);
+            Rect bounds,message;
+            if(GetWindow(dialog,4)!=owner || label==IntPtr.Zero || !GetWindowRect(dialog,out bounds) || !GetWindowRect(label,out message)){
+                throw new Exception("The owned TUN warning is missing the complete message: "+text);
             }
             var monitor=new MonitorInfo{size=(uint)Marshal.SizeOf(typeof(MonitorInfo))};
-            if(!GetMonitorInfo(MonitorFromWindow(window,2),ref monitor) || !Contains(monitor.work,bounds)){
-                throw new Exception(String.Format("TUN guidance y {0}..{1} is outside the monitor work area y {2}..{3}.",
-                    bounds.top,bounds.bottom,monitor.work.top,monitor.work.bottom));
+            if(!GetMonitorInfo(MonitorFromWindow(dialog,2),ref monitor) || !Contains(monitor.work,bounds) || !Contains(bounds,message)){
+                throw new Exception(String.Format("TUN warning y {0}..{1}, message y {2}..{3}, monitor work y {4}..{5}.",
+                    bounds.top,bounds.bottom,message.top,message.bottom,monitor.work.top,monitor.work.bottom));
             }
-            int dpi=(int)GetDpiForWindow(label);
-            using(var g=Graphics.FromHwnd(label)){
-                var dc=g.GetHdc();
-                IntPtr fallback=IntPtr.Zero,oldFont=IntPtr.Zero;
-                try {
-                    IntPtr font;
-                    if(Send(label,0x31,IntPtr.Zero,IntPtr.Zero,TimedFlags,750,out font)!=IntPtr.Zero && font!=IntPtr.Zero){
-                        oldFont=SelectObject(dc,font); // WM_GETFONT
-                    }
-                    if(oldFont==IntPtr.Zero || oldFont==new IntPtr(-1)){
-                        // A font owned by the separate GUI process may be inaccessible.
-                        fallback=CreateFont(-(10*dpi+36)/72,0,0,0,400,0,0,0,1,4,0,5,34,"Microsoft YaHei UI");
-                        oldFont=SelectObject(dc,fallback);
-                    }
-                    if(oldFont==IntPtr.Zero || oldFont==new IntPtr(-1))throw new Exception("Unable to measure the Win32 label font.");
-                    const uint calculate=0x400|0x800; // DT_CALCRECT | DT_NOPREFIX
-                    var oneLine=client;
-                    var wrapped=client;
-                    int oneLineHeight=DrawText(dc,text,-1,ref oneLine,calculate|0x20); // DT_SINGLELINE
-                    int height=DrawText(dc,text,-1,ref wrapped,calculate|0x10|0x2000); // DT_WORDBREAK | DT_EDITCONTROL
-                    string detail=String.Format("TUN guidance DPI {0}, client {1}x{2}, label y {3}..{4}, monitor work y {5}..{6}, one line {7}px, wrap needs {8}x{9}",
-                        dpi,client.right,client.bottom,bounds.top,bounds.bottom,monitor.work.top,monitor.work.bottom,oneLineHeight,wrapped.right,height);
-                    if(height<=0 || wrapped.right>client.right || height>client.bottom){
-                        throw new Exception(detail+": label is not fully visible");
-                    }
-                    return detail;
-                } finally {
-                    if(oldFont!=IntPtr.Zero && oldFont!=new IntPtr(-1))SelectObject(dc,oldFont);
-                    if(fallback!=IntPtr.Zero)DeleteObject(fallback);
-                    g.ReleaseHdc(dc);
-                }
-            }
+            return String.Format("TUN warning and full message fit in monitor work area y {0}..{1}.",monitor.work.top,monitor.work.bottom);
         } finally {
             if(previous!=IntPtr.Zero)SetThreadDpiAwarenessContext(previous);
         }
     }
+    public static void ConfirmDialog(IntPtr dialog){Click(GetDlgItem(dialog,1));}
     private static bool Contains(Rect outer,Rect inner){
         return inner.left>=outer.left && inner.top>=outer.top && inner.right<=outer.right && inner.bottom<=outer.bottom;
     }
@@ -447,7 +397,7 @@ public static class KeyDockWindowProbe {
 
     private static void SaveWindow(Bitmap image,string path,IntPtr hwnd,Rectangle frame,string heading,string source){
         image.Save(path,ImageFormat.Png);
-        if(heading==null)return;
+        if(String.IsNullOrEmpty(heading))return;
         IntPtr label=IntPtr.Zero;
         EnumChildWindows(hwnd,(h,a)=>{
             if(Class(h).Equals("static",StringComparison.OrdinalIgnoreCase) && IsWindowVisible(h) && Text(h)==heading){

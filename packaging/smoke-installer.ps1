@@ -159,21 +159,18 @@ function Test-CrossPathTrayIdentity {
         [KeyDockWindowProbe]::SelectTray($alternateSink)
         $null = Wait-For 'secondary window reopened through its tray' { [KeyDockWindowProbe]::IsWindowVisible($alternateWindow) }
         [KeyDockWindowProbe]::SelectMode($alternateWindow,1)
-        [KeyDockWindowProbe]::Click([KeyDockWindowProbe]::Child($alternateWindow,'button','启用 TUN'))
+        [KeyDockWindowProbe]::ClickForModal([KeyDockWindowProbe]::Child($alternateWindow,'button','启用 TUN'))
         # This staged executable deliberately fails TUN preflight. The
-        # download instructions wrap in the same label as the admin instructions.
+        # download and admin instructions use the same native warning dialog.
         $tunPreflight = '请从 KeyDock 的「软件下载」页下载 Windows 安装包，退出托盘中的助手后安装，再从开始菜单打开 KeyDock Connect'
-        try {
-            $null = Wait-For 'visible TUN preflight guidance' {
-                [KeyDockWindowProbe]::Child($alternateWindow,'label',$tunPreflight) -ne [IntPtr]::Zero
-            }
-        } catch {
-            Trace-Smoke ([KeyDockWindowProbe]::VisibleLabels($alternateWindow))
-            throw
-        } finally {
-            [KeyDockWindowProbe]::Capture($alternateWindow,(Join-Path $shots '07-tun-preflight.png'),'设备接入')
+        $tunDialog = Wait-For 'native TUN preflight warning' {
+            $h = [KeyDockWindowProbe]::Window($alternate.Id,'#32770','TUN 操作未完成')
+            if ($h -ne [IntPtr]::Zero -and [KeyDockWindowProbe]::IsWindowVisible($h)) { $h }
         }
-        Trace-Smoke ([KeyDockWindowProbe]::AssertReadableWrappedLabel($alternateWindow,$tunPreflight))
+        [KeyDockWindowProbe]::Capture($tunDialog,(Join-Path $shots '07-tun-preflight.png'),'')
+        Trace-Smoke ([KeyDockWindowProbe]::AssertDialogMessage($tunDialog,$alternateWindow,$tunPreflight))
+        [KeyDockWindowProbe]::ConfirmDialog($tunDialog)
+        $null = Wait-For 'TUN warning dismissed' { -not [KeyDockWindowProbe]::IsWindowVisible($tunDialog) }
         [KeyDockWindowProbe]::Click([KeyDockWindowProbe]::Child($alternateWindow,'button','退出接入助手'))
         if (-not $alternate.WaitForExit(15000) -or $alternate.ExitCode -ne 0) {
             throw 'The secondary instance failed to exit cleanly.'
