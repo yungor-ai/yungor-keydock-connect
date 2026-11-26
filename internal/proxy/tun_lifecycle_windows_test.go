@@ -64,6 +64,10 @@ func TestWindowsTUNRoutesAndWinINetRestore(t *testing.T) {
 		if selected, err := getBestInterface(); err != nil || selected != index {
 			t.Fatalf("Windows did not select the TUN route: %v", err)
 		}
+		row := windows.MibIpInterfaceRow{Family: windows.AF_INET, InterfaceLuid: luid}
+		if err := windows.GetIpInterfaceEntry(&row); err != nil || row.NlMtu != 1500 {
+			t.Fatalf("Windows TUN MTU = %d, want 1500: %v", row.NlMtu, err)
+		}
 		if settings, err := currentSettings(); err != nil || settings != settingsBefore {
 			t.Fatal("TUN changed Windows system proxy settings")
 		}

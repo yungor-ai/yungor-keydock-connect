@@ -46,8 +46,8 @@ func (c *Controller) watchNetwork(ctx context.Context, report func(Check), probe
 			cancel()
 		}
 		route = next
-		report(Check{Stage: "google", Status: "running", Message: "正在检测 Google 连通性…"})
-		report(Check{Stage: "egress", Status: "running", Message: "正在查询出口 IPv4…"})
+		report(Check{Stage: "google", Status: "running", Message: "正在通过 TCP HTTPS 检测 www.google.com…"})
+		report(Check{Stage: "egress", Status: "running", Message: "正在通过 TCP HTTPS 查询出口 IPv4…"})
 		probeCtx, stop := context.WithCancel(ctx)
 		cancel = stop
 		out := make(chan networkcheck.Result, 1)
@@ -104,22 +104,23 @@ func (r networkRoute) check(ctx context.Context, probe func(context.Context, *ht
 }
 
 func reportNetworkResult(server string, result networkcheck.Result, report func(Check)) {
-	google := Check{Stage: "google", Status: "failed", Message: "无法访问 www.google.com"}
+	google := Check{Stage: "google", Status: "failed", Message: "www.google.com（TCP HTTPS）"}
 	if result.GoogleReachable {
-		google.Status, google.Message = "ok", "可以访问 www.google.com"
+		google.Status = "ok"
 	}
 	report(google)
-	egress := Check{Stage: "egress", Status: "failed", Message: "无法获取出口 IPv4，请检查当前网络或代理后重试"}
+	if result.ExitIP == "" {
+		report(Check{Stage: "egress", Status: "failed", Message: "TCP HTTPS 未获取到出口 IPv4"})
+		return
+	}
+	egress := Check{Stage: "egress", Status: "warning", Message: result.ExitIP + "（TCP HTTPS）"}
 	switch {
-	case result.ExitIP == "":
 	case server == "":
-		egress.Status, egress.Message = "skipped", result.ExitIP+"（尚未配置 KeyDock）"
+		egress.Status, egress.Message = "skipped", result.ExitIP+"（TCP HTTPS，尚未配置 KeyDock）"
 	case len(result.ServerIPs) == 0:
-		egress.Status, egress.Message = "skipped", result.ExitIP+"（未查到 KeyDock 服务器 IPv4，请联系管理员）"
+		egress.Status, egress.Message = "skipped", result.ExitIP+"（TCP HTTPS，KeyDock 无可用 IPv4）"
 	case result.IPMatch:
-		egress.Status, egress.Message = "ok", result.ExitIP+"（与 KeyDock 服务器 IPv4 一致）"
-	default:
-		egress.Status, egress.Message = "warning", result.ExitIP+"（与 KeyDock 服务器 IPv4 不一致）"
+		egress.Status = "ok"
 	}
 	report(egress)
 }

@@ -135,7 +135,7 @@ static NSTextField *heading(NSString *text) { return label(text, 16, NSFontWeigh
 
 static NSArray<NSString *> *checkDescriptions(void) {
     return @[@"从服务器获取设备配置", @"写入本机 Codex 配置", @"发送模型测试请求",
-             @"通过 SS 节点测试 HTTPS 请求", @"检测 google.com 的访问状态", @"检测公网 IPv4 并与 KeyDock 服务器比较"];
+             @"通过 SS 节点测试 HTTPS 请求", @"用 TCP HTTPS 检测 www.google.com", @"TCP HTTPS 出口与 KeyDock IPv4 比较"];
 }
 
 @implementation KDWindowController

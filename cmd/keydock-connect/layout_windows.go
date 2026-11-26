@@ -44,8 +44,8 @@ var connectionStages = []checkStage{
 }
 
 var stages = slices.Concat(connectionStages, []checkStage{
-	{"google", "Google 连通", "检测 google.com 的访问状态"},
-	{"egress", "出口 IPv4", "检测公网 IPv4 并与 KeyDock 服务器比较"},
+	{"google", "Google 连通", "用 TCP HTTPS 检测 www.google.com"},
+	{"egress", "出口 IPv4", "TCP HTTPS 出口与 KeyDock IPv4 比较"},
 })
 
 type checkRow struct {

@@ -3,7 +3,6 @@ package desktop
 import (
 	"context"
 	"net/http"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -102,8 +101,28 @@ func TestWatchNetworkReplacesStartupResultsOnProxyChange(t *testing.T) {
 			t.Fatal("network results were not reported")
 		}
 	}
-	if google.Status != "ok" || egress.Status != "warning" || !strings.Contains(egress.Message, "192.0.2.11") {
+	if google.Status != "ok" || google.Message != "www.google.com（TCP HTTPS）" ||
+		egress.Status != "warning" || egress.Message != "192.0.2.11（TCP HTTPS）" {
 		t.Fatalf("unexpected current route results: google=%+v egress=%+v", google, egress)
+	}
+}
+
+func TestReportNetworkResultKeepsIPv4ComparisonInStatus(t *testing.T) {
+	result := networkcheck.Result{ExitIP: "192.0.2.10", ServerIPs: []string{"192.0.2.10"}, IPMatch: true}
+	var google, egress Check
+	reportNetworkResult(address, result, func(check Check) {
+		switch check.Stage {
+		case "google":
+			google = check
+		case "egress":
+			egress = check
+		}
+	})
+	if google.Status != "failed" || google.Message != "www.google.com（TCP HTTPS）" {
+		t.Fatalf("Google probe should identify its target and transport: %+v", google)
+	}
+	if egress.Status != "ok" || egress.Message != "192.0.2.10（TCP HTTPS）" {
+		t.Fatalf("IPv4 probe should keep the address separate from its verdict: %+v", egress)
 	}
 }
 
@@ -116,14 +135,20 @@ func TestReportNetworkResultWhenAnIPv4AddressIsMissing(t *testing.T) {
 			name:    "exit has no IPv4",
 			server:  "https://192.0.2.10",
 			status:  "failed",
-			message: "请检查当前网络或代理",
+			message: "TCP HTTPS 未获取到出口 IPv4",
 			result:  networkcheck.Result{ServerIPs: []string{"192.0.2.10"}},
 		},
 		{
 			name:    "server has no IPv4",
 			server:  "https://[2001:db8::20]",
 			status:  "skipped",
-			message: "请联系管理员",
+			message: "192.0.2.10（TCP HTTPS，KeyDock 无可用 IPv4）",
+			result:  networkcheck.Result{ExitIP: "192.0.2.10"},
+		},
+		{
+			name:    "server not configured",
+			status:  "skipped",
+			message: "192.0.2.10（TCP HTTPS，尚未配置 KeyDock）",
 			result:  networkcheck.Result{ExitIP: "192.0.2.10"},
 		},
 	} {
@@ -134,7 +159,7 @@ func TestReportNetworkResultWhenAnIPv4AddressIsMissing(t *testing.T) {
 					got = check
 				}
 			})
-			if got.Status != test.status || !strings.Contains(got.Message, "IPv4") || !strings.Contains(got.Message, test.message) {
+			if got.Status != test.status || got.Message != test.message {
 				t.Fatalf("egress report = %+v, want %s with IPv4 guidance %q", got, test.status, test.message)
 			}
 		})

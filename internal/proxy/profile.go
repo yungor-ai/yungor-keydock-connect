@@ -21,6 +21,7 @@ import (
 
 const profileLimit = 512 << 10
 const tunDeviceName = "KeyDockTun"
+const windowsTUNMTU = 1500
 
 // Decode only fields that KeyDock's SS2022 feed is allowed to control.
 // Credentials are passed to the core on stdin. They never enter logs or argv.
@@ -56,6 +57,7 @@ type tunSettings struct {
 	DNSMode             string    `yaml:"dns-mode"`
 	DNSHijack           []string  `yaml:"dns-hijack"`
 	Inet6Address        *[]string `yaml:"inet6-address,omitempty"`
+	MTU                 int       `yaml:"mtu,omitempty"`
 }
 
 type snifferSettings struct {
@@ -279,6 +281,8 @@ func buildRoutingProfileWithTUN(body []byte, port int, diagnostic bool, mode Mod
 	if mode == ModeTUN {
 		if tun == nil {
 			tun = makeTUNSettings(tunDeviceName)
+			// Apply the same MTU as Clash Verge Rev instead of Mihomo's 9000-byte default.
+			tun.MTU = windowsTUNMTU
 		}
 		profile.IPv6 = tun.Inet6Address == nil || len(*tun.Inet6Address) > 0
 		profile.TUN = tun

@@ -85,7 +85,7 @@ func TestRejectsInvalidFeedWithoutLeakingContents(t *testing.T) {
 }
 
 func TestTUNProfilePreservesRoutingAndUsesTrustedRuntimeSettings(t *testing.T) {
-	source := []byte(fixture + `tun: {enable: false, device: "untrusted-device", strict-route: true, dns-hijack: ["any:53"]}
+	source := []byte(fixture + `tun: {enable: false, device: "untrusted-device", strict-route: true, dns-hijack: ["any:53"], mtu: 9000}
 dns: {enable: true, nameserver: ["https://untrusted.invalid/dns-query"]}
 sniffer: {enable: false, override-destination: true}
 ipv6: false
@@ -118,7 +118,7 @@ allow-lan: true
 	}
 	wantTUN := map[string]any{
 		"enable": true, "device": "KeyDockTun", "stack": "mips", "auto-route": true,
-		"auto-detect-interface": true, "strict-route": false, "dns-mode": "disabled", "dns-hijack": []any{},
+		"auto-detect-interface": true, "strict-route": false, "dns-mode": "disabled", "dns-hijack": []any{}, "mtu": 1500,
 	}
 	if !reflect.DeepEqual(tun["tun"], wantTUN) {
 		t.Fatalf("unexpected TUN settings: %v", tun["tun"])
