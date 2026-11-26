@@ -209,6 +209,11 @@ func (p *child) tunReady() (bool, error) {
 	if !ipv4Assigned || !ipv4Route {
 		return false, nil
 	}
+	// Wintun publishes its routes before applying the adapter's MTU.
+	ipv4Interface := windows.MibIpInterfaceRow{Family: windows.AF_INET, InterfaceLuid: luid}
+	if err := windows.GetIpInterfaceEntry(&ipv4Interface); err != nil || ipv4Interface.NlMtu != windowsTUNMTU {
+		return false, err
+	}
 	selected, err := getBestInterface()
 	if err != nil || selected != index {
 		return false, err
