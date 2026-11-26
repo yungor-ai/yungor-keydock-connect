@@ -53,23 +53,34 @@ func TestCheckSeparatesGoogleReachabilityFromExitIPComparison(t *testing.T) {
 			want: Result{GoogleReachable: true, ExitIP: "192.0.2.20", ServerIPs: []string{"192.0.2.20"}, IPMatch: true},
 		},
 		{
-			name:   "IPv6 without brackets and a different exit IP",
+			name:   "IPv6 server literal leaves the IPv4 comparison unknown",
 			server: "2001:db8:0:0::20",
 			transport: testTransport{
-				google:                   {status: 204},
-				"https://api6.ipify.org": {status: 200, body: "2001:db8::21"},
+				google:                  {status: 204},
+				"https://api.ipify.org": {status: 200, body: "192.0.2.21"},
+				universal:               {status: 200, body: "2001:db8::21"},
 			},
-			want: Result{GoogleReachable: true, ExitIP: "2001:db8::21", ServerIPs: []string{"2001:db8::20"}},
+			want: Result{GoogleReachable: true, ExitIP: "192.0.2.21"},
 		},
 		{
-			name:   "failed IPv6 endpoint keeps same path for dual-stack service",
-			server: "https://[2001:db8::20]",
+			name:   "IPv6 fallback cannot be compared with an IPv4 server",
+			server: "https://192.0.2.20",
 			transport: testTransport{
-				google:                   {status: 204},
-				"https://api6.ipify.org": {status: 503},
-				universal:                {status: 200, body: "192.0.2.21"},
+				google:                  {status: 204},
+				"https://api.ipify.org": {status: 503},
+				universal:               {status: 200, body: "2001:db8::20"},
 			},
-			want: Result{GoogleReachable: true, ExitIP: "192.0.2.21", ServerIPs: []string{"2001:db8::20"}},
+			want: Result{GoogleReachable: true, ServerIPs: []string{"192.0.2.20"}},
+		},
+		{
+			name:   "IPv4 fallback can be compared with a mapped IPv4 server",
+			server: "https://[::ffff:192.0.2.20]",
+			transport: testTransport{
+				google:                  {status: 204},
+				"https://api.ipify.org": {status: 503},
+				universal:               {status: 200, body: "192.0.2.21"},
+			},
+			want: Result{GoogleReachable: true, ExitIP: "192.0.2.21", ServerIPs: []string{"192.0.2.20"}},
 		},
 		{
 			name: "Google redirect does not resolve through another host",
@@ -111,10 +122,10 @@ func TestCheckSeparatesGoogleReachabilityFromExitIPComparison(t *testing.T) {
 }
 
 func TestServerIPLookupSupportsHostnames(t *testing.T) {
-	ips := serverIPs(t.Context(), "https://localhost:8443/keydock")
+	ips := serverIPv4s(t.Context(), "https://localhost:8443/keydock")
 	for _, ip := range ips {
-		if !ip.IsLoopback() {
-			t.Errorf("localhost returned non-loopback address %s", ip)
+		if !ip.Is4() || !ip.IsLoopback() {
+			t.Errorf("localhost returned an address outside IPv4 loopback: %s", ip)
 		}
 	}
 	if len(ips) == 0 {

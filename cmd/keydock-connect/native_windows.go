@@ -21,25 +21,25 @@ const exportDiagnosticsLabel = "导出诊断日志"
 var trayGUID = windows.GUID{Data1: 0xad3e9258, Data2: 0x1960, Data3: 0x428e, Data4: [8]byte{0xa5, 0x9f, 0x40, 0x7e, 0x2d, 0x94, 0x69, 0xe3}}
 
 type nativeWindow struct {
-	app                             *walk.Application
-	controller                      *desktop.Controller
-	window                          *walk.MainWindow
-	server, key                     *walk.LineEdit
-	device, message, proxyHint      *walk.TextLabel
-	clockHint                       *walk.TextLabel
-	troubleshooting                 *walk.Composite
-	proxyState, proxyUpdatedAt      *walk.Label
-	proxyModes                      *walk.ComboBox
-	rows                            []checkRow
-	colors                          windowColors
-	connect, proxy, launch, restore *walk.PushButton
-	export, timeSettings            *walk.PushButton
-	state                           desktop.State
-	cleaned                         bool
-	results                         map[string]desktop.Check
-	cancel                          context.CancelFunc
-	quitting                        bool
-	choosingExportPath              bool
+	app                        *walk.Application
+	controller                 *desktop.Controller
+	window                     *walk.MainWindow
+	server, key                *walk.LineEdit
+	device, message, proxyHint *walk.TextLabel
+	clockHint                  *walk.TextLabel
+	troubleshooting            *walk.Composite
+	proxyState, proxyUpdatedAt *walk.Label
+	proxyModes                 *walk.ComboBox
+	rows                       []checkRow
+	colors                     windowColors
+	connect, proxy, restore    *walk.PushButton
+	export, timeSettings       *walk.PushButton
+	state                      desktop.State
+	cleaned                    bool
+	results                    map[string]desktop.Check
+	cancel                     context.CancelFunc
+	quitting                   bool
+	choosingExportPath         bool
 }
 
 func runWindow(dir string, controller *desktop.Controller) error {
@@ -56,11 +56,7 @@ func runWindow(dir string, controller *desktop.Controller) error {
 	if err := ui.build(icon); err != nil {
 		return err
 	}
-	ui.proxyModes.CurrentIndexChanged().Attach(func() {
-		if !ui.state.Proxy {
-			ui.renderProxy()
-		}
-	})
+	ui.proxyModes.CurrentIndexChanged().Attach(ui.renderProxy)
 	// The Walk layout worker closes its quit channel when App.Exit cancels
 	// the app context. A form may only be disposed while that worker is alive.
 	enteredLoop := false
@@ -184,7 +180,6 @@ func (ui *nativeWindow) enable() {
 	ui.server.SetEnabled(idle)
 	ui.key.SetEnabled(idle)
 	ui.connect.SetEnabled(idle)
-	ui.launch.SetEnabled(idle && ui.state.Configured)
 	ui.restore.SetEnabled(idle && ui.state.Restorable)
 	ui.export.SetEnabled(idle)
 	ui.timeSettings.SetEnabled(idle)

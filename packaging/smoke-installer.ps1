@@ -1,4 +1,4 @@
-﻿# This test installs a per-user program, exercises Windows DPAPI, and uninstalls it.
+﻿# This test installs KeyDock Connect in Program Files, exercises Windows DPAPI, and uninstalls it.
 # Only run it in a disposable hosted Windows job.
 $ErrorActionPreference = 'Stop'
 if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') {
@@ -26,7 +26,7 @@ function Invoke-SmokeProcess([string]$label, [string]$file, [string[]]$arguments
     Trace-Smoke "$label exited with $($p.ExitCode)"
     return $p.ExitCode
 }
-$installDir = Join-Path $env:LOCALAPPDATA 'Programs\KeyDock Connect'
+$installDir = Join-Path $env:ProgramFiles 'KeyDock Connect'
 if (Test-Path $installDir) { throw 'The install location must be empty on the disposable runner.' }
 $installer = (Resolve-Path 'dist/installer/KeyDockConnect-Setup-windows-x64.exe').Path
 $version = (Get-Content -Raw -LiteralPath 'VERSION').Trim()
@@ -35,7 +35,23 @@ if ("$($versionInfo.FileMajorPart).$($versionInfo.FileMinorPart).$($versionInfo.
     throw 'The Windows installer file version differs from VERSION.'
 }
 $flags = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
-$setupCode = Invoke-SmokeProcess 'per-user installation' $installer $flags 90
+$legacyRegistration = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{1F72CD21-C12E-40B7-9D93-98527EF65242}_is1'
+if (Test-Path -LiteralPath $legacyRegistration) { throw 'The disposable runner already has a legacy install registration.' }
+$null = New-Item -Path $legacyRegistration -Force
+try {
+    $null = New-ItemProperty -LiteralPath $legacyRegistration -Name DisplayName -Value 'KeyDock Connect'
+    $setupCode = Invoke-SmokeProcess 'installation with legacy per-user registration' $installer $flags 30
+    # Inno exits with 7 when PrepareToInstall refuses to proceed.
+    if ($setupCode -ne 7 -or (Test-Path -LiteralPath $installDir)) { throw 'Setup did not stop for the legacy per-user install.' }
+} finally {
+    Remove-Item -LiteralPath $legacyRegistration
+}
+$customDir = Join-Path $env:RUNNER_TEMP ('keydock-custom-dir-' + [Guid]::NewGuid().ToString('N'))
+$setupCode = Invoke-SmokeProcess 'installation with redirected directory' $installer ($flags + ('/DIR="' + $customDir + '"')) 30
+if ($setupCode -ne 7 -or (Test-Path -LiteralPath $installDir) -or (Test-Path -LiteralPath $customDir)) {
+    throw 'Setup accepted a directory outside Program Files.'
+}
+$setupCode = Invoke-SmokeProcess 'Program Files installation' $installer $flags 90
 if ($setupCode -ne 0) { throw "Installation failed ($setupCode)." }
 Trace-Smoke 'Checking installed files against the staged payload'
 
@@ -104,6 +120,10 @@ function Wait-For($description, [scriptblock]$condition, [int]$seconds=20) {
     Trace-Smoke "Timed out waiting for $description"
     throw "Timed out waiting for $description"
 }
+function Get-ProxyActionCount {
+    $history = Get-Content -Raw -LiteralPath (Join-Path $state 'diagnostics-history.json') | ConvertFrom-Json
+    return @($history | Where-Object { $_.stage -in @('proxy.enable','proxy.disable') }).Count
+}
 try {
     $null = Wait-For 'test gateway' { Test-Path (Join-Path $testRoot 'fixture-origin') }
     $origin = Get-Content -Raw (Join-Path $testRoot 'fixture-origin')
@@ -139,6 +159,9 @@ try {
         [KeyDockWindowProbe]::CheckStatus($handle,'设备授权','待检查',$null) -and
         [KeyDockWindowProbe]::Child($handle,'label','系统代理未启用') -ne [IntPtr]::Zero -and
         [KeyDockWindowProbe]::Child($handle,'label-prefix','最近更新时间 ') -eq [IntPtr]::Zero
+    }
+    if ([KeyDockWindowProbe]::Child($handle,'any-button','打开 Codex') -ne [IntPtr]::Zero) {
+        throw 'The native window still contains the Open Codex button.'
     }
     [KeyDockWindowProbe]::Capture($handle,(Join-Path $shots '01-first-launch.png'),'设备接入')
     [KeyDockWindowProbe]::Enter($serverField,$origin)
@@ -183,7 +206,7 @@ try {
     [KeyDockWindowProbe]::Enter($keyField,'fixture-device-key')
     [KeyDockWindowProbe]::Click($startButton)
     $null = Wait-For 'four native connection checks' {
-        $ready = [KeyDockWindowProbe]::Child($handle,'button','打开 Codex')
+        $ready = [KeyDockWindowProbe]::Child($handle,'button','恢复原 Codex 配置')
         [KeyDockWindowProbe]::CheckStatus($handle,'设备授权','完成','演示工作站') -and
         [KeyDockWindowProbe]::CheckStatus($handle,'Codex 配置','完成','synthetic-model') -and
         [KeyDockWindowProbe]::CheckStatus($handle,'模型连通','完成',$null) -and
@@ -245,8 +268,27 @@ try {
     [KeyDockWindowProbe]::AssertReadableLabel($handle,'演示工作站 · synthetic-model')
     [KeyDockWindowProbe]::AssertReadableLabel($handle,'启用后，使用系统代理的应用流量将按订阅规则分流。')
     Copy-Item $connectedShot $shot -Force
+
+    $internetSettings = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+    $beforeSelection = Get-ItemProperty $internetSettings
+    $actionsBeforeSelection = Get-ProxyActionCount
+    [KeyDockWindowProbe]::SelectMode($handle,1)
+    $null = Wait-For 'TUN selected and awaiting confirmation' {
+        [KeyDockWindowProbe]::Child($handle,'button','启用 TUN') -ne [IntPtr]::Zero -and
+        [KeyDockWindowProbe]::Child($handle,'label','TUN 未启用') -ne [IntPtr]::Zero -and
+        [KeyDockWindowProbe]::Child($handle,'label','通过虚拟网卡按订阅规则分流，覆盖绕过系统代理的应用。') -ne [IntPtr]::Zero
+    }
+    [KeyDockWindowProbe]::SelectMode($handle,0)
+    $null = Wait-For 'system proxy selected and awaiting confirmation' {
+        [KeyDockWindowProbe]::Child($handle,'button','启用系统代理') -ne [IntPtr]::Zero -and
+        [KeyDockWindowProbe]::Child($handle,'label','系统代理未启用') -ne [IntPtr]::Zero
+    }
+    $afterSelection = Get-ItemProperty $internetSettings
+    if ($afterSelection.ProxyEnable -ne $beforeSelection.ProxyEnable -or $afterSelection.ProxyServer -ne $beforeSelection.ProxyServer -or (Get-ProxyActionCount) -ne $actionsBeforeSelection) {
+        throw 'Changing the selection attempted to update the Windows proxy without confirmation.'
+    }
     [KeyDockWindowProbe]::Click([KeyDockWindowProbe]::Child($handle,'button','启用系统代理'))
-    $turnOff = Wait-For 'enabled Windows proxy and matching UI state' {
+    $null = Wait-For 'enabled Windows proxy and matching UI state' {
         $button = [KeyDockWindowProbe]::Child($handle,'button','关闭系统代理')
         if ($button -ne [IntPtr]::Zero -and [KeyDockWindowProbe]::Child($handle,'label','系统代理已启用') -ne [IntPtr]::Zero) { $button }
     }
@@ -255,8 +297,23 @@ try {
         throw 'The proxy card does not display a full subscription update timestamp.'
     }
     [KeyDockWindowProbe]::AssertReadableLabel($handle,$updatedAt)
-    $inet = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+    $inet = Get-ItemProperty $internetSettings
     if ($inet.ProxyEnable -ne 1 -or $inet.ProxyServer -notmatch '^127\.0\.0\.1:[0-9]+$') { throw 'UI proxy status does not match Windows Internet Settings.' }
+    $actionsBeforeSelection = Get-ProxyActionCount
+    [KeyDockWindowProbe]::SelectMode($handle,1)
+    $null = Wait-For 'active system proxy awaiting confirmation to switch to TUN' {
+        [KeyDockWindowProbe]::Child($handle,'button','切换至 TUN') -ne [IntPtr]::Zero -and
+        [KeyDockWindowProbe]::Child($handle,'label','系统代理已启用') -ne [IntPtr]::Zero
+    }
+    $pending = Get-ItemProperty $internetSettings
+    if ($pending.ProxyEnable -ne $inet.ProxyEnable -or $pending.ProxyServer -ne $inet.ProxyServer -or (Get-ProxyActionCount) -ne $actionsBeforeSelection) {
+        throw 'Selecting TUN interrupted the active Windows system proxy.'
+    }
+    [KeyDockWindowProbe]::SelectMode($handle,0)
+    $turnOff = Wait-For 'system proxy selected again' {
+        $button = [KeyDockWindowProbe]::Child($handle,'button','关闭系统代理')
+        if ($button -ne [IntPtr]::Zero) { $button }
+    }
     # The ephemeral fixture CA has no revocation service. Schannel still
     # validates the certificate chain and host and rejects revoked certificates.
     $throughSS = & "$env:SystemRoot\System32\curl.exe" -fsS --ssl-revoke-best-effort --max-time 8 --noproxy unused.invalid --proxy "http://$($inet.ProxyServer)" "$origin/check-proxy"

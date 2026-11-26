@@ -4,7 +4,6 @@
 enum {
     KD_CONNECT = 1,
     KD_PROXY,
-    KD_OPEN_CODEX,
     KD_RESTORE,
     KD_EXPORT
 };
@@ -28,7 +27,7 @@ void kdRunWindow(void);
 void kdShowError(const char *message);
 void kdReopenWindow(void);
 void kdSetState(const char *server, const char *device, const char *model,
-                int paired, int configured, int restorable, int subscription, int proxyMode,
+                int paired, int restorable, int subscription, int proxyMode,
                 const char *address, const char *updatedAt, int refreshFailed);
 void kdSetCheck(int row, const char *status, const char *message, const char *hint);
 void kdFinishOperation(const char *message, int failed);

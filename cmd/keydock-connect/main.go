@@ -53,6 +53,11 @@ func run(args []string) error {
 	if !supported {
 		return errors.New("KeyDock 接入助手支持 Windows x64 和 Apple Silicon Mac")
 	}
+	if uninstall {
+		if err := checkUninstallUser(); err != nil {
+			return err
+		}
+	}
 	if err = os.MkdirAll(stateDir, 0700); err != nil {
 		return err
 	}

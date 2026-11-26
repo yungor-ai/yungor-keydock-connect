@@ -96,7 +96,7 @@ func publishMacState(state desktop.State, initial bool) {
 	defer C.free(unsafe.Pointer(model))
 	defer C.free(unsafe.Pointer(address))
 	defer C.free(unsafe.Pointer(updatedAt))
-	C.kdSetState(server, device, model, cFlag(state.Paired), cFlag(state.Configured),
+	C.kdSetState(server, device, model, cFlag(state.Paired),
 		cFlag(state.Restorable), cFlag(state.Subscription), cProxyMode(state.ProxyMode), address, updatedAt, cFlag(state.SubscriptionRefreshFailed))
 }
 
@@ -194,9 +194,6 @@ func kdMacAction(action C.int, first, second *C.char) {
 			enable := firstValue == "on"
 			mode := proxy.Mode(secondValue)
 			message, err = setMacProxyMode(controller, enable, mode)
-		case C.KD_OPEN_CODEX:
-			err = controller.OpenCodex()
-			message = "已请求打开 Codex。若 Codex 已运行，请完全退出后重开以加载新配置。"
 		case C.KD_RESTORE:
 			err = controller.Restore()
 			message = "已恢复原 Codex 配置"

@@ -125,7 +125,8 @@ public static class KeyDockWindowProbe {
         IntPtr found=IntPtr.Zero;
         EnumChildWindows(parent,(h,a)=>{var cls=Class(h).ToLowerInvariant();var style=GetStyle(h,-16);
             bool editable=cls=="edit";
-            bool hits=kind=="button" ? cls=="button" && Text(h)==caption && IsWindowEnabled(h)
+            bool hits=(kind=="button" || kind=="any-button") ? cls=="button" && Text(h)==caption && (kind=="any-button" || IsWindowEnabled(h))
+                : kind=="combo" ? cls=="combobox" && IsWindowVisible(h) && IsWindowEnabled(h)
                 : kind=="server" ? editable && (style & 36)==0
                 : kind=="key" ? editable && (style & 32)!=0
                 : cls=="static" && IsWindowVisible(h) &&
@@ -181,6 +182,16 @@ public static class KeyDockWindowProbe {
         }
     }
     public static void Enter(IntPtr h,string v){IntPtr result;if(h==IntPtr.Zero||WriteText(h,12,IntPtr.Zero,v,TimedFlags,2500,out result)==IntPtr.Zero||result==IntPtr.Zero)throw new Exception("Native edit control did not accept input");}
+    public static void SelectMode(IntPtr window,int index){
+        var combo=Child(window,"combo",null);
+        IntPtr result;
+        if(combo==IntPtr.Zero || Send(combo,0x014E,(IntPtr)index,IntPtr.Zero,TimedFlags,2500,out result)==IntPtr.Zero || result.ToInt64()!=index)
+            throw new Exception("Native proxy mode selector did not accept the selection");
+        // CB_SETCURSEL changes the native selection without notifying its parent.
+        int selectionChanged=(1<<16) | (GetDlgCtrlID(combo)&0xffff);
+        if(Send(GetParent(combo),0x0111,(IntPtr)selectionChanged,combo,TimedFlags,2500,out result)==IntPtr.Zero)
+            throw new TimeoutException("Native proxy mode selection did not notify the window");
+    }
     public static void Click(IntPtr h){if(h==IntPtr.Zero)throw new Exception("Native button not available");IntPtr result;if(Send(h,0xF5,IntPtr.Zero,IntPtr.Zero,TimedFlags,4000,out result)==IntPtr.Zero)throw new TimeoutException("Native button did not respond");}
     public static void ClickForModal(IntPtr h){
         if(h==IntPtr.Zero || !Post(h,0xF5,IntPtr.Zero,IntPtr.Zero))throw new Exception("Could not open the native dialog");

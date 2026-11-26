@@ -12,7 +12,7 @@ import (
 // TUN elevates the pinned core. Only offer it from the fixed administrator-
 // managed installation tree, rather than elevating a per-user program directory.
 func checkProtectedTUNInstall(corePath string) error {
-	unprotected := errors.New("TUN 需要从 Program Files 下的 KeyDock Connect 目录运行。请让管理员将完整程序放入该目录")
+	unprotected := errors.New("请从 KeyDock 的「软件下载」页下载 Windows 安装包，退出托盘中的助手后安装，再从开始菜单打开 KeyDock Connect")
 	programFiles, err := windows.KnownFolderPath(windows.FOLDERID_ProgramFiles, 0)
 	if err != nil {
 		return unprotected

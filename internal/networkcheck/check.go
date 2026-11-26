@@ -16,11 +16,10 @@ import (
 const (
 	googleURL      = "https://www.google.com/generate_204"
 	ipv4URL        = "https://api.ipify.org"
-	ipv6URL        = "https://api6.ipify.org"
 	dualStackURL   = "https://api64.ipify.org"
 	checkTimeout   = 8 * time.Second
 	dnsTimeout     = 2 * time.Second
-	familyTimeout  = 3 * time.Second
+	ipv4Timeout    = 3 * time.Second
 	maxAddressBody = 256
 )
 
@@ -32,8 +31,7 @@ type Result struct {
 }
 
 // Check sends the public probes through the supplied client's transport. A nil
-// client uses the default HTTP transport. A missing exit or server IP leaves
-// the comparison unknown.
+// client uses the default HTTP transport. The IP comparison uses only IPv4.
 func Check(ctx context.Context, client *http.Client, server string) Result {
 	ctx, cancel := context.WithTimeout(ctx, checkTimeout)
 	defer cancel()
@@ -56,9 +54,9 @@ func Check(ctx context.Context, client *http.Client, server string) Result {
 	}()
 
 	dnsContext, cancelDNS := context.WithTimeout(ctx, dnsTimeout)
-	ips := serverIPs(dnsContext, server)
+	ips := serverIPv4s(dnsContext, server)
 	cancelDNS()
-	exit := exitIP(ctx, &probeClient, ips)
+	exit := exitIPv4(ctx, &probeClient)
 	result := Result{GoogleReachable: <-google}
 	for _, ip := range ips {
 		result.ServerIPs = append(result.ServerIPs, ip.String())
@@ -70,55 +68,44 @@ func Check(ctx context.Context, client *http.Client, server string) Result {
 	return result
 }
 
-func serverIPs(ctx context.Context, server string) []netip.Addr {
-	server = strings.TrimSpace(server)
-	if ip, err := netip.ParseAddr(server); err == nil {
-		return []netip.Addr{ip.Unmap().WithZone("")}
+func serverIPv4s(ctx context.Context, server string) []netip.Addr {
+	host := strings.TrimSpace(server)
+	if _, err := netip.ParseAddr(host); err != nil {
+		if !strings.Contains(host, "://") {
+			host = "//" + host
+		}
+		parsed, err := url.Parse(host)
+		if err != nil || parsed.Hostname() == "" || parsed.User != nil {
+			return nil
+		}
+		host = parsed.Hostname()
 	}
-	if !strings.Contains(server, "://") {
-		server = "//" + server
-	}
-	parsed, err := url.Parse(server)
-	if err != nil || parsed.Hostname() == "" || parsed.User != nil {
-		return nil
-	}
-	ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", parsed.Hostname())
+	ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip4", host)
 	if err != nil {
 		return nil
 	}
-	for i, ip := range ips {
-		ips[i] = ip.Unmap().WithZone("")
+	// The resolver can return an IPv6 literal even for an IPv4 lookup.
+	ipv4s := ips[:0]
+	for _, ip := range ips {
+		if ip = ip.Unmap(); ip.Is4() {
+			ipv4s = append(ipv4s, ip)
+		}
 	}
-	slices.SortFunc(ips, netip.Addr.Compare)
-	return slices.Compact(ips)
+	slices.SortFunc(ipv4s, netip.Addr.Compare)
+	return slices.Compact(ipv4s)
 }
 
-func exitIP(ctx context.Context, client *http.Client, ips []netip.Addr) netip.Addr {
-	var ipv4, ipv6 bool
-	for _, addr := range ips {
-		if addr.Is4() {
-			ipv4 = true
-		} else {
-			ipv6 = true
-		}
+func exitIPv4(ctx context.Context, client *http.Client) netip.Addr {
+	probeCtx, cancel := context.WithTimeout(ctx, ipv4Timeout)
+	ip := readIPv4(probeCtx, client, ipv4URL)
+	cancel()
+	if ip.IsValid() {
+		return ip
 	}
-	// Prefer the same address family as a single-family KeyDock server.
-	if ipv4 != ipv6 {
-		preferredURL := ipv4URL
-		if ipv6 {
-			preferredURL = ipv6URL
-		}
-		familyContext, cancel := context.WithTimeout(ctx, familyTimeout)
-		preferredIP := readIP(familyContext, client, preferredURL)
-		cancel()
-		if preferredIP.IsValid() {
-			return preferredIP
-		}
-	}
-	return readIP(ctx, client, dualStackURL)
+	return readIPv4(ctx, client, dualStackURL)
 }
 
-func readIP(ctx context.Context, client *http.Client, endpoint string) netip.Addr {
+func readIPv4(ctx context.Context, client *http.Client, endpoint string) netip.Addr {
 	response := get(ctx, client, endpoint)
 	if response == nil {
 		return netip.Addr{}
@@ -135,7 +122,11 @@ func readIP(ctx context.Context, client *http.Client, endpoint string) netip.Add
 	if err != nil || ip.Zone() != "" {
 		return netip.Addr{}
 	}
-	return ip.Unmap()
+	ip = ip.Unmap()
+	if !ip.Is4() {
+		return netip.Addr{}
+	}
+	return ip
 }
 
 func get(ctx context.Context, client *http.Client, endpoint string) *http.Response {

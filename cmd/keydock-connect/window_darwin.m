@@ -28,14 +28,12 @@ static NSString *const reopenNotification = @"ai.yungor.keydock-connect.reopen";
 @property NSPopUpButton *proxyModePicker;
 @property NSButton *proxyButton;
 @property NSButton *addressCopyButton;
-@property NSButton *codexButton;
 @property NSButton *restoreButton;
 @property NSButton *exportButton;
 @property NSString *proxyAddress;
 @property int proxyMode;
 @property BOOL busy;
 @property BOOL quitting;
-@property BOOL configured;
 @property BOOL restorable;
 @property BOOL subscription;
 @end
@@ -134,7 +132,7 @@ static NSTextField *heading(NSString *text) { return label(text, 16, NSFontWeigh
 
 static NSArray<NSString *> *checkDescriptions(void) {
     return @[@"从服务器获取设备配置", @"写入本机 Codex 配置", @"发送模型测试请求",
-             @"通过 SS 节点测试 HTTPS 请求", @"检测 google.com 的访问状态", @"检测公网 IP 并与 KeyDock 服务器比较"];
+             @"通过 SS 节点测试 HTTPS 请求", @"检测 google.com 的访问状态", @"检测公网 IPv4 并与 KeyDock 服务器比较"];
 }
 
 @implementation KDWindowController
@@ -218,9 +216,7 @@ static NSArray<NSString *> *checkDescriptions(void) {
     self.device = label(@"输入管理员提供的服务器地址和设备密钥。", 13, NSFontWeightRegular, secondary);
     singleLine(self.device);
     NSStackView *identity = stack(@[title, self.device], NSUserInterfaceLayoutOrientationVertical, 2);
-    self.codexButton = [self button:@"打开 Codex" action:@selector(openCodex:)];
-    [self.codexButton.widthAnchor constraintGreaterThanOrEqualToConstant:104].active = YES;
-    KDSurface *header = surface(stack(@[icon, identity, [NSView new], self.codexButton],
+    KDSurface *header = surface(stack(@[icon, identity, [NSView new]],
                                      NSUserInterfaceLayoutOrientationHorizontal, 14), teal, NSEdgeInsetsMake(14, 22, 14, 22));
     [header.heightAnchor constraintGreaterThanOrEqualToConstant:78].active = YES;
 
@@ -258,7 +254,7 @@ static NSArray<NSString *> *checkDescriptions(void) {
     NSMutableArray<NSArray<NSView *> *> *results = [NSMutableArray new];
     NSMutableArray<NSTextField *> *statuses = [NSMutableArray new];
     NSMutableArray<NSTextField *> *details = [NSMutableArray new];
-    NSArray<NSString *> *stages = @[@"设备授权", @"Codex 配置", @"模型连通", @"代理连通", @"Google 连通", @"出口 IP"];
+    NSArray<NSString *> *stages = @[@"设备授权", @"Codex 配置", @"模型连通", @"代理连通", @"Google 连通", @"出口 IPv4"];
     NSArray<NSString *> *descriptions = checkDescriptions();
     for (NSUInteger row = 0; row < stages.count; row++) {
         NSTextField *status = label(@"待检查", 12, NSFontWeightMedium, secondary);
@@ -403,33 +399,30 @@ static NSArray<NSString *> *checkDescriptions(void) {
     self.networkCheckButton.enabled = !self.quitting;
     self.server.enabled = idle;
     self.deviceKey.enabled = idle;
-    self.codexButton.enabled = idle && self.configured;
     self.restoreButton.enabled = idle && self.restorable;
     self.exportButton.enabled = idle;
     [self renderProxy];
 }
 
 - (int)selectedProxyMode {
-    if (self.proxyMode != KD_PROXY_INACTIVE) return self.proxyMode;
     return self.proxyModePicker.selectedTag == KD_PROXY_TUN ? KD_PROXY_TUN : KD_PROXY_LOCAL;
 }
 
 - (void)renderProxy {
+    int selected = [self selectedProxyMode];
     BOOL active = self.proxyMode != KD_PROXY_INACTIVE;
     BOOL idle = !self.busy && !self.quitting;
-    BOOL tun = [self selectedProxyMode] == KD_PROXY_TUN;
-    if (active) [self.proxyModePicker selectItemWithTag:self.proxyMode];
-    self.proxyModePicker.enabled = idle && !active;
-    self.proxyButton.enabled = idle && (active || self.subscription);
+    BOOL tun = (active ? self.proxyMode : selected) == KD_PROXY_TUN;
+    self.proxyModePicker.enabled = idle;
+    self.proxyButton.enabled = idle && (selected == self.proxyMode || self.subscription);
     self.addressCopyButton.hidden = tun;
     self.addressCopyButton.enabled = idle && self.proxyMode == KD_PROXY_LOCAL && self.proxyAddress.length;
 
     NSString *title = active ? @"本地代理已启用" : @"本地代理未启用";
-    NSString *buttonTitle = active ? @"停用本地代理" : @"启用本地代理";
+    NSString *action = !active ? @"启用" : (selected == self.proxyMode ? @"关闭" : @"切换至");
     NSString *detail = @"连接设备并获取 SS 订阅后，可在此启用。";
     if (tun) {
         title = active ? @"TUN 已启用" : @"TUN 未启用";
-        buttonTitle = active ? @"关闭 TUN" : @"启用 TUN";
         if (active) {
             detail = @"流量正通过虚拟网卡按订阅规则分流。";
         } else if (self.subscription) {
@@ -440,7 +433,7 @@ static NSArray<NSString *> *checkDescriptions(void) {
     } else if (self.subscription) {
         detail = @"启用后，可将地址填入支持 HTTP 或 SOCKS5 的应用。";
     }
-    self.proxyButton.title = buttonTitle;
+    self.proxyButton.title = [action stringByAppendingString:selected == KD_PROXY_TUN ? @" TUN" : @"本地代理"];
     self.proxyTitle.textColor = active ? success() : ink();
     setText(self.proxyTitle, title);
     setText(self.proxyStatus, detail);
@@ -513,8 +506,9 @@ static NSArray<NSString *> *checkDescriptions(void) {
 - (void)proxyModeChanged:(id)sender { [self renderProxy]; }
 
 - (void)toggleProxy:(id)sender {
-    NSString *toggle = self.proxyMode == KD_PROXY_INACTIVE ? @"on" : @"off";
-    NSString *mode = [self selectedProxyMode] == KD_PROXY_TUN ? @"tun" : @"local";
+    int selected = [self selectedProxyMode];
+    NSString *toggle = selected == self.proxyMode ? @"off" : @"on";
+    NSString *mode = selected == KD_PROXY_TUN ? @"tun" : @"local";
     [self runAction:KD_PROXY first:toggle second:mode];
 }
 
@@ -524,8 +518,6 @@ static NSArray<NSString *> *checkDescriptions(void) {
     [NSPasteboard.generalPasteboard setString:self.proxyAddress forType:NSPasteboardTypeString];
     [self showNotice:@"已复制本地代理地址，可填入支持 HTTP 或 SOCKS5 的应用。" failure:NO];
 }
-
-- (void)openCodex:(id)sender { [self runAction:KD_OPEN_CODEX first:nil second:nil]; }
 
 - (void)restore:(id)sender {
     NSAlert *alert = [NSAlert new];
@@ -583,7 +575,7 @@ void kdReopenWindow(void) {
 }
 
 void kdSetState(const char *server, const char *device, const char *model,
-                int paired, int configured, int restorable, int subscription, int proxyMode,
+                int paired, int restorable, int subscription, int proxyMode,
                 const char *address, const char *updatedAt, int refreshFailed) {
     @autoreleasepool {
         NSString *initialServer = server ? str(server) : nil;
@@ -600,7 +592,6 @@ void kdSetState(const char *server, const char *device, const char *model,
             } else {
                 setText(ui.device, @"输入管理员提供的服务器地址和设备密钥。");
             }
-            ui.configured = configured;
             ui.restorable = restorable;
             ui.subscription = subscription;
             [ui updateProxyMode:proxyMode address:proxyAddress];

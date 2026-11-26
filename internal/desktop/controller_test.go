@@ -25,13 +25,28 @@ type fixtureProxy struct {
 	checks     int
 	err        error
 	refreshErr error
+	checkErr   map[proxy.Mode]error
+	startErr   map[proxy.Mode]error
+	stops      int
 }
 
-func (p *fixtureProxy) ActiveMode() proxy.Mode                    { return p.mode }
-func (p *fixtureProxy) CheckMode(proxy.Mode) error                { return nil }
-func (p *fixtureProxy) StartMode(_ string, mode proxy.Mode) error { p.mode = mode; return nil }
-func (p *fixtureProxy) Stop() error                               { p.mode = ""; return nil }
-func (p *fixtureProxy) Test(_ context.Context, s string) error    { p.tested = s; return p.err }
+func (p *fixtureProxy) ActiveMode() proxy.Mode          { return p.mode }
+func (p *fixtureProxy) CheckMode(mode proxy.Mode) error { return p.checkErr[mode] }
+func (p *fixtureProxy) StartMode(_ string, mode proxy.Mode) error {
+	if err := p.CheckMode(mode); err != nil {
+		return err
+	}
+	if p.mode != "" && p.mode != mode {
+		return errors.New("active proxy must be stopped before switching modes")
+	}
+	if err := p.startErr[mode]; err != nil {
+		return err
+	}
+	p.mode = mode
+	return nil
+}
+func (p *fixtureProxy) Stop() error                            { p.stops++; p.mode = ""; return nil }
+func (p *fixtureProxy) Test(_ context.Context, s string) error { p.tested = s; return p.err }
 func (p *fixtureProxy) Refresh(_ context.Context, s string) error {
 	p.refreshed = s
 	p.checks++
@@ -76,7 +91,7 @@ func deviceTest(t *testing.T) (*Controller, *fixtureProxy) {
 			return nil
 		},
 		Matches:    func(_, _, _, model, key string) bool { return key == assigned.Key && target == model },
-		Configured: func(string, string) bool { return target != "" }, Restore: func(string, string) error { target = ""; return nil }, Launch: func() error { return nil },
+		Configured: func(string, string) bool { return target != "" }, Restore: func(string, string) error { target = ""; return nil },
 	}
 	stateDir := t.TempDir()
 	c, err := NewController(t.TempDir(), stateDir, proxy, ops, diagnostics.New(stateDir))
@@ -246,6 +261,32 @@ func TestExportDiagnosticsAfterProxyFailure(t *testing.T) {
 	want := []string{"device:ok", "codex:ok", "model:ok", "proxy:ok", "device:ok", "codex:ok", "model:ok", "proxy:failed"}
 	if !reflect.DeepEqual(completed, want) {
 		t.Fatalf("unexpected diagnostics: %v", completed)
+	}
+}
+
+func TestProxySwitchKeepsPreviousModeWhenTargetFails(t *testing.T) {
+	c, p := deviceTest(t)
+	if err := c.Connect(context.Background(), address, enrollmentKey, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetProxyMode(true, proxy.ModeSystem); err != nil {
+		t.Fatal(err)
+	}
+	stops := p.stops
+	permissionErr := errors.New("TUN permission required")
+	p.checkErr = map[proxy.Mode]error{proxy.ModeTUN: permissionErr}
+	if err := c.SetProxyMode(true, proxy.ModeTUN); !errors.Is(err, permissionErr) || p.stops != stops || p.mode != proxy.ModeSystem {
+		t.Fatalf("preflight failure interrupted the previous mode: stops=%d mode=%q err=%v", p.stops, p.mode, err)
+	}
+	p.checkErr = nil
+	startErr := errors.New("TUN could not start")
+	p.startErr = map[proxy.Mode]error{proxy.ModeTUN: startErr}
+	if err := c.SetProxyMode(true, proxy.ModeTUN); !errors.Is(err, startErr) || p.stops != stops+1 || p.mode != proxy.ModeSystem {
+		t.Fatalf("failed switch did not restore the previous mode: stops=%d mode=%q err=%v", p.stops, p.mode, err)
+	}
+	p.startErr = nil
+	if err := c.SetProxyMode(true, proxy.ModeTUN); err != nil || p.stops != stops+2 || p.mode != proxy.ModeTUN {
+		t.Fatalf("switch to TUN failed: stops=%d mode=%q err=%v", p.stops, p.mode, err)
 	}
 }
 

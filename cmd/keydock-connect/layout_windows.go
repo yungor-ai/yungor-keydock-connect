@@ -45,7 +45,7 @@ var connectionStages = []checkStage{
 
 var stages = slices.Concat(connectionStages, []checkStage{
 	{"google", "Google 连通", "检测 google.com 的访问状态"},
-	{"egress", "出口 IP", "检测公网 IP 并与 KeyDock 服务器比较"},
+	{"egress", "出口 IPv4", "检测公网 IPv4 并与 KeyDock 服务器比较"},
 })
 
 type checkRow struct {
@@ -73,9 +73,6 @@ func (ui *nativeWindow) build(icon *walk.Icon) error {
 				d.Label{Text: "设备接入", Font: uiFont(19, true), TextColor: colors.ink,
 					MinSize: d.Size{Height: 38}, MaxSize: d.Size{Height: 38}},
 				d.TextLabel{AssignTo: &ui.device, NoPrefix: true, MinSize: d.Size{Width: 150}, TextColor: colors.muted},
-			}},
-			d.PushButton{AssignTo: &ui.launch, Text: "打开 Codex", MinSize: d.Size{Width: 104, Height: 32}, MaxSize: d.Size{Width: 104}, OnClicked: func() {
-				ui.runAction("正在打开 Codex…", "已打开 Codex", func(context.Context) error { return ui.controller.OpenCodex() })
 			}},
 		},
 	}

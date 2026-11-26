@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -34,7 +35,6 @@ type Backend struct {
 	Configured         func(home, stateDir string) bool
 	Matches            func(home, stateDir, base, model, key string) bool
 	Protect, Unprotect func([]byte) ([]byte, error)
-	Launch             func() error
 	Fetch              func(context.Context, string, string) (connect.DeviceConfig, error)
 	TestModel          func(context.Context, connect.Profile) error
 }
@@ -45,7 +45,7 @@ func SystemBackend(stateDir string) Backend {
 		Apply: codex.Apply, Restore: codex.Restore, Configured: codex.Configured, Matches: codex.Matches,
 		Protect:   func(data []byte) ([]byte, error) { return codex.ProtectForState(stateDir, data) },
 		Unprotect: func(data []byte) ([]byte, error) { return codex.UnprotectForState(stateDir, data) },
-		Launch:    launchCodex, Fetch: client.Fetch, TestModel: client.TestModel,
+		Fetch:     client.Fetch, TestModel: client.TestModel,
 	}
 }
 
@@ -301,8 +301,6 @@ func proxyClockHint(skew time.Duration) string {
 	return "检测到本机时钟比 KeyDock 服务端" + direction + "了 30 秒以上。" + syncTime
 }
 
-func (c *Controller) CheckProxyMode(mode proxy.Mode) error { return c.proxy.CheckMode(mode) }
-
 func (c *Controller) SetProxyMode(on bool, mode proxy.Mode) error {
 	if !c.operation.TryLock() {
 		return errBusy
@@ -325,10 +323,24 @@ func (c *Controller) SetProxyMode(on bool, mode proxy.Mode) error {
 		if url == "" {
 			return errors.New("该设备没有可用的 SS 订阅")
 		}
-		if active := c.proxy.ActiveMode(); active != "" && active == mode {
-			return nil
+		active := c.proxy.ActiveMode()
+		if active != "" {
+			if active == mode {
+				return nil
+			}
+			if err := c.proxy.CheckMode(mode); err != nil {
+				return err
+			}
+			if err := c.proxy.Stop(); err != nil {
+				return err
+			}
 		}
 		if err := c.proxy.StartMode(url, mode); err != nil {
+			if active != "" {
+				if restoreErr := c.proxy.StartMode(url, active); restoreErr != nil {
+					return errors.Join(err, fmt.Errorf("无法恢复原代理：%w", restoreErr))
+				}
+			}
 			return err
 		}
 		c.noteSubscriptionRefresh(false)
@@ -392,7 +404,6 @@ func (c *Controller) Restore() error {
 	defer c.operation.Unlock()
 	return c.recordAction("codex.restore", func() error { return c.ops.Restore(c.home, c.stateDir) })
 }
-func (c *Controller) OpenCodex() error { return c.recordAction("codex.launch", c.ops.Launch) }
 
 // The shell cancels any in-progress Connect before calling Close. Wait until it
 // releases the operation so a racing proxy toggle cannot run after shutdown.

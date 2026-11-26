@@ -106,3 +106,37 @@ func TestWatchNetworkReplacesStartupResultsOnProxyChange(t *testing.T) {
 		t.Fatalf("unexpected current route results: google=%+v egress=%+v", google, egress)
 	}
 }
+
+func TestReportNetworkResultWhenAnIPv4AddressIsMissing(t *testing.T) {
+	for _, test := range []struct {
+		name, server, status, message string
+		result                        networkcheck.Result
+	}{
+		{
+			name:    "exit has no IPv4",
+			server:  "https://192.0.2.10",
+			status:  "failed",
+			message: "请检查当前网络或代理",
+			result:  networkcheck.Result{ServerIPs: []string{"192.0.2.10"}},
+		},
+		{
+			name:    "server has no IPv4",
+			server:  "https://[2001:db8::20]",
+			status:  "skipped",
+			message: "请联系管理员",
+			result:  networkcheck.Result{ExitIP: "192.0.2.10"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var got Check
+			reportNetworkResult(test.server, test.result, func(check Check) {
+				if check.Stage == "egress" {
+					got = check
+				}
+			})
+			if got.Status != test.status || !strings.Contains(got.Message, "IPv4") || !strings.Contains(got.Message, test.message) {
+				t.Fatalf("egress report = %+v, want %s with IPv4 guidance %q", got, test.status, test.message)
+			}
+		})
+	}
+}
