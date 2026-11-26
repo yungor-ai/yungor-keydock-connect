@@ -2,7 +2,9 @@ using System;
 using System.Text;
 using System.Drawing;
 using System.Drawing.Imaging;
+using System.IO;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Windows.Forms;
 
 public static class KeyDockWindowProbe {
@@ -52,6 +54,7 @@ public static class KeyDockWindowProbe {
     [DllImport("user32.dll",EntryPoint="GetUserObjectInformationW")] private static extern bool UserFlags(IntPtr obj,int index,out ObjectFlags flags,int size,out int needed);
     [DllImport("kernel32.dll",SetLastError=true)] private static extern Microsoft.Win32.SafeHandles.SafeProcessHandle OpenProcess(uint access,bool inherit,uint pid);
     [DllImport("kernel32.dll",SetLastError=true)] private static extern bool GetExitCodeProcess(Microsoft.Win32.SafeHandles.SafeProcessHandle handle,out uint code);
+    [DllImport("kernel32.dll",CharSet=CharSet.Unicode)] private static extern bool QueryFullProcessImageName(Microsoft.Win32.SafeHandles.SafeProcessHandle handle,uint flags,StringBuilder name,ref int length);
     // Retain a query handle before the process exits. Windows PowerShell 5.1's
     // redirected Start-Process can otherwise return null for Process.ExitCode.
     public static Microsoft.Win32.SafeHandles.SafeProcessHandle WatchExit(int pid){
@@ -273,29 +276,33 @@ public static class KeyDockWindowProbe {
     }
     public static void HideViaClose(IntPtr h){Post(h,0x10,IntPtr.Zero,IntPtr.Zero);}
     public static void SelectTray(IntPtr sink){if(sink==IntPtr.Zero)throw new Exception("No native tray callback window");Post(sink,0x403,IntPtr.Zero,(IntPtr)0x400);}
+    public static Guid TrayGuid(IntPtr sink){
+        uint pid;
+        if(GetWindowThreadProcessId(sink,out pid)==0)return Guid.Empty;
+        var name=new StringBuilder(32768);
+        int length=name.Capacity;
+        using(var process=OpenProcess(0x1000,false,pid)){
+            if(process.IsInvalid || !QueryFullProcessImageName(process,0,name,ref length))return Guid.Empty;
+        }
+        var path=Path.GetFullPath(name.ToString()).ToLowerInvariant();
+        var bytes=new byte[16];
+        using(var sha=SHA256.Create()){
+            var hash=sha.ComputeHash(Encoding.UTF8.GetBytes("ai.yungor.keydock-connect.tray\0"+path));
+            Array.Copy(hash,bytes,bytes.Length);
+        }
+        bytes[7]=(byte)((bytes[7]&0x0f)|0x80);
+        bytes[8]=(byte)((bytes[8]&0x3f)|0x80);
+        return new Guid(bytes);
+    }
     private static bool TrayRect(IntPtr sink,out Rect box){
-        var item=new TrayItem {size=(uint)Marshal.SizeOf(typeof(TrayItem)),guid=new Guid("ad3e9258-1960-428e-a59f-407e2d9469e3")};
+        var guid=TrayGuid(sink);
+        if(guid==Guid.Empty){box=new Rect();return false;}
+        var item=new TrayItem {size=(uint)Marshal.SizeOf(typeof(TrayItem)),guid=guid};
         return Shell_NotifyIconGetRect(ref item,out box)==0 && box.right>box.left && box.bottom>box.top;
     }
-    public static bool HasGuidTray(){
+    public static bool HasGuidTray(IntPtr sink){
         Rect box;
-        return TrayRect(IntPtr.Zero,out box);
-    }
-    public static IntPtr AnonymousTray(int process){
-        IntPtr sink=IntPtr.Zero;
-        EnumWindows((h,a)=>{
-            uint pid;
-            GetWindowThreadProcessId(h,out pid);
-            if(pid!=process || Class(h)!="WalkNotifyIconSink")return true;
-            // Walk uses the pair of window handle and UID 0 for its first
-            // non-GUID tray icon. A rejected GUID can leave another sink.
-            var item=new TrayItem {size=(uint)Marshal.SizeOf(typeof(TrayItem)),window=h,id=0,guid=Guid.Empty};
-            Rect box;
-            if(Shell_NotifyIconGetRect(ref item,out box)!=0 || box.right<=box.left || box.bottom<=box.top)return true;
-            sink=h;
-            return false;
-        },IntPtr.Zero);
-        return sink;
+        return TrayRect(sink,out box);
     }
     private static bool MouseClick(Point point,bool right) {
         if(!SetCursorPos(point.X,point.Y))return false;

@@ -4,7 +4,11 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"unsafe"
@@ -16,9 +20,6 @@ import (
 )
 
 const exportDiagnosticsLabel = "导出诊断日志"
-
-// This stable GUID also lets Windows retain the user's notification-area preferences.
-var trayGUID = windows.GUID{Data1: 0xad3e9258, Data2: 0x1960, Data3: 0x428e, Data4: [8]byte{0xa5, 0x9f, 0x40, 0x7e, 0x2d, 0x94, 0x69, 0xe3}}
 
 type nativeWindow struct {
 	app                        *walk.Application
@@ -70,9 +71,11 @@ func runWindow(dir string, controller *desktop.Controller) error {
 	ui.window.SetExitOnClose(false)
 	var tray *walk.NotifyIcon
 	if windowsTaskbarAvailable() {
-		tray = ui.createTray(icon, func() (*walk.NotifyIcon, error) { return walk.NewNotifyIconWithGUID(trayGUID) })
+		if executable, err := os.Executable(); err == nil {
+			guid := trayGUIDForPath(executable)
+			tray = ui.createTray(icon, func() (*walk.NotifyIcon, error) { return walk.NewNotifyIconWithGUID(guid) })
+		}
 		if tray == nil {
-			// Explorer can retain the GUID's original executable path after a move.
 			tray = ui.createTray(icon, walk.NewNotifyIcon)
 		}
 	}
@@ -131,6 +134,21 @@ func runWindow(dir string, controller *desktop.Controller) error {
 		return nil
 	}
 	return controller.Close() // Includes session shutdown initiated by Windows.
+}
+
+func trayGUIDForPath(executable string) windows.GUID {
+	// Explorer binds a tray GUID to the executable path, so installations in
+	// different locations must use distinct identities across launches.
+	path := strings.ToLower(filepath.Clean(executable))
+	digest := sha256.Sum256([]byte("ai.yungor.keydock-connect.tray\x00" + path))
+	digest[7] = digest[7]&0x0f | 0x80 // UUID version 8, application-defined.
+	digest[8] = digest[8]&0x3f | 0x80 // RFC UUID variant.
+	return windows.GUID{
+		Data1: binary.LittleEndian.Uint32(digest[:4]),
+		Data2: binary.LittleEndian.Uint16(digest[4:6]),
+		Data3: binary.LittleEndian.Uint16(digest[6:8]),
+		Data4: [8]byte(digest[8:16]),
+	}
 }
 
 func windowsTaskbarAvailable() bool {
