@@ -253,7 +253,8 @@ try {
     }
 
     # Restore the normal subscription and exercise the system-proxy actions.
-    $peer = Start-Process (Join-Path $installDir 'core\mihomo.exe') -ArgumentList ('-d "{0}" -f "{1}"' -f $testRoot,$ssConfig) -PassThru
+    # Keep the synthetic SS peer outside the installation tree during upgrades.
+    $peer = Start-Process (Join-Path $stage 'core\mihomo.exe') -ArgumentList ('-d "{0}" -f "{1}"' -f $testRoot,$ssConfig) -PassThru
     $null = Wait-For 'local SS2022 fixture listener' {
         if ($peer.HasExited) { throw 'Loopback SS peer exited early.' }
         $client = [Net.Sockets.TcpClient]::new()
@@ -390,8 +391,10 @@ try {
     $exitCode = [KeyDockWindowProbe]::ExitStatus($exitHandle)
     Trace-Smoke "Installed application exited through the tray with code $exitCode"
     if ($exitCode -ne 0) { throw "Tray exit failed (exit $exitCode)" }
-    $updateAfterExit = Invoke-SmokeProcess 'online installer after app exit' $installer $updateFlags 45
+    $setupLog = Join-Path $testRoot 'online-update-setup.log'
+    $updateAfterExit = Invoke-SmokeProcess 'online installer after app exit' $installer ($updateFlags + ('/LOG="' + $setupLog + '"')) 45
     if ($updateAfterExit -ne 0 -or -not (Test-Path $exe) -or (Get-FileHash $config).Hash -ne $managedHash) {
+        if (Test-Path -LiteralPath $setupLog) { Get-Content -LiteralPath $setupLog -Tail 40 }
         throw 'Online installer did not preserve the device configuration after app exit.'
     }
 
