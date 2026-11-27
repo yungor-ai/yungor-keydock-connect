@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/yungor-ai/yungor-keydock-connect/internal/connect"
 	"gopkg.in/yaml.v3"
 )
 
@@ -60,7 +61,7 @@ type tunSettings struct {
 	MTU                 int       `yaml:"mtu,omitempty"`
 }
 
-// Mihomo's native macOS resolver intercepts only queries to its utun address.
+// Mihomo answers DNS at its TUN adapter without a separate listening socket.
 type dnsSettings struct {
 	Enable                      bool                `yaml:"enable"`
 	IPv6                        bool                `yaml:"ipv6"`
@@ -74,7 +75,7 @@ type dnsSettings struct {
 	ProxyServerNameServerPolicy map[string][]string `yaml:"proxy-server-nameserver-policy"`
 }
 
-func nativeTUNDNS(cfg *routing, names map[string]bool) *dnsSettings {
+func buildTUNDNS(cfg *routing, names map[string]bool, serverURL string) *dnsSettings {
 	// Mihomo interprets '&' and '=' in a DoH URL fragment even after URL
 	// escaping. Only interpolate a locally assigned adapter name.
 	const base = "KeyDock-DNS"
@@ -89,8 +90,17 @@ func nativeTUNDNS(cfg *routing, names map[string]bool) *dnsSettings {
 	bootstrap := []string{"https://223.5.5.5/dns-query", "https://223.6.6.6/dns-query"}
 	local := []string{"localhost", "+.localhost", "+.local", "+.lan", "+.internal", "+.home.arpa", "+.in-addr.arpa", "+.ip6.arpa"}
 	privatePolicy := strings.Join(local, ",")
+	filters := local
+	// The exit IPv4 check resolves the enrolled server itself. A synthetic
+	// address here would always disagree with the actual exit address.
+	if u, err := connect.ServerURL(serverURL); err == nil {
+		host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+		if validHost(host) && net.ParseIP(host) == nil {
+			filters = append(filters, host)
+		}
+	}
 	return &dnsSettings{
-		Enable: true, EnhancedMode: "fake-ip", FakeIPRange: "198.18.0.1/16", FakeIPFilter: local,
+		Enable: true, EnhancedMode: "fake-ip", FakeIPRange: "198.18.0.1/16", FakeIPFilter: filters,
 		NameServer:        []string{"https://1.1.1.1/dns-query#" + adapter, "https://8.8.8.8/dns-query#" + adapter},
 		NameServerPolicy:  map[string][]string{privatePolicy: {"system"}, "geosite:cn": bootstrap},
 		DefaultNameServer: bootstrap, ProxyServerNameServer: bootstrap,
@@ -239,7 +249,7 @@ func buildRouting(body []byte, port int, diagnostic bool) ([]byte, error) {
 }
 
 func buildRoutingProfile(body []byte, port int, diagnostic bool, mode Mode) ([]byte, error) {
-	return buildRoutingProfileWithTUN(body, port, diagnostic, mode, nil)
+	return buildRoutingProfileWithTUN(body, port, diagnostic, mode, nil, "")
 }
 
 func makeTUNSettings(device string) *tunSettings {
@@ -247,7 +257,7 @@ func makeTUNSettings(device string) *tunSettings {
 		DNSMode: "disabled", DNSHijack: []string{}}
 }
 
-func buildRoutingProfileWithTUN(body []byte, port int, diagnostic bool, mode Mode, tun *tunSettings) ([]byte, error) {
+func buildRoutingProfileWithTUN(body []byte, port int, diagnostic bool, mode Mode, tun *tunSettings, serverURL string) ([]byte, error) {
 	if mode != ModeSystem && mode != ModeLocal && mode != ModeTUN {
 		return nil, errors.New("代理模式无效")
 	}
@@ -332,10 +342,13 @@ func buildRoutingProfileWithTUN(body []byte, port int, diagnostic bool, mode Mod
 			// The SS relay needs IPv4 destinations. Reject IPv6 on Windows while
 			// TUN is active so clients can fall back without bypassing the tunnel.
 			tun.StrictRoute = true
+			// Windows prefers the metric-zero TUN resolver. Native mode also
+			// lets NRPT send scoped queries to a VPN's designated DNS server.
+			tun.DNSMode = "native"
 		}
 		profile.TUN = tun
 		if tun.DNSMode == "native" {
-			profile.DNS = nativeTUNDNS(&profile.Routing, names)
+			profile.DNS = buildTUNDNS(&profile.Routing, names, serverURL)
 		}
 		// Use HTTP Host or TLS/QUIC SNI for domain rules without replacing the
 		// resolver's destination IP, which still drives the IP rules and dial.

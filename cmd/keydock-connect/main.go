@@ -122,6 +122,7 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
+	mgr.EnrolledServer = controller.ServerURL
 	err = runWindow(stateDir, controller)
 	if err != nil {
 		log.Record("app.window", "failed", 0, err, 0)

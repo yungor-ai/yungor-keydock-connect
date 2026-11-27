@@ -38,7 +38,7 @@ func buildDarwinTUNProfile(body []byte) ([]byte, error) {
 	// Leave dns-hijack empty so domain-specific VPN resolvers can answer directly.
 	tun.DNSMode = "native"
 	tun.Inet6Address = &[]string{}
-	return buildRoutingProfileWithTUN(body, 0, false, ModeTUN, tun)
+	return buildRoutingProfileWithTUN(body, 0, false, ModeTUN, tun, "")
 }
 
 // runDarwinTUN runs inside the launchd helper. The GUI never owns the

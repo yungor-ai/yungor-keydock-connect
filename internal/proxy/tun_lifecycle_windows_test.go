@@ -3,11 +3,7 @@ package proxy
 import (
 	"context"
 	"errors"
-	"fmt"
-	"io"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"os"
 	"strconv"
@@ -145,70 +141,9 @@ func verifyWindowsTUNIPv4OnlyPeer(t *testing.T, core string) {
 	const hostname = "dual-stack.example.com"
 	const ipv4 = "203.0.113.41:443"
 	const ipv6 = "[2001:db8::41]:443"
-	const marker = "encrypted Windows TUN traffic"
-	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, marker)
-	}))
-	t.Cleanup(target.Close)
-	seen := make(chan string, 8)
-	// The fixture exit can resolve the domain or reach its IPv4 address. It
-	// observes raw IPv6 requests before closing them like an IPv4-only exit.
-	exit := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodConnect {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		if r.Host != hostname+":443" && r.Host != ipv4 && r.Host != ipv6 {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		select {
-		case seen <- r.Host:
-		default:
-			return
-		}
-		client, buffered, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			return
-		}
-		defer client.Close()
-		if _, err = buffered.WriteString("HTTP/1.1 200 Connection established\r\n\r\n"); err != nil || buffered.Flush() != nil {
-			return
-		}
-		if r.Host == ipv6 {
-			return
-		}
-		destination, err := net.DialTimeout("tcp4", target.Listener.Addr().String(), 2*time.Second)
-		if err != nil {
-			return
-		}
-		defer destination.Close()
-		go func() {
-			io.Copy(destination, buffered)
-			destination.Close()
-		}()
-		io.Copy(client, destination)
-	}))
-	t.Cleanup(exit.Close)
-	ssPort := reservePort(t)
-	peer := fmt.Sprintf(`mode: rule
-log-level: warning
-listeners:
-  - name: fixture-ss
-    type: shadowsocks
-    listen: 127.0.0.1
-    port: %d
-    cipher: 2022-blake3-aes-128-gcm
-    password: "AAAAAAAAAAAAAAAAAAAAAA=="
-    users: {test-device: "AQEBAQEBAQEBAQEBAQEBAQ=="}
-proxies:
-  - {name: fixture-exit, type: http, server: 127.0.0.1, port: %d}
-rules:
-  - MATCH,fixture-exit
-`, ssPort, exit.Listener.Addr().(*net.TCPAddr).Port)
-	stopPeer := runFixtureCore(t, core, []byte(peer), ssPort)
+	peer := newWindowsHTTPSPeer(t, core, map[string]bool{hostname + ":443": true, ipv4: true, ipv6: false})
 	port := reservePort(t)
-	body := []byte(peerSubscription(ssPort))
+	body := []byte(peerSubscription(peer.ssPort))
 	m := New(t.TempDir(), core)
 	stop := func() {
 		t.Helper()
@@ -232,51 +167,6 @@ rules:
 			t.Fatal(err)
 		}
 	}
-	checkExit := func(expected string) {
-		t.Helper()
-		select {
-		case destination := <-seen:
-			if destination != expected {
-				t.Fatalf("SS2022 exit received %q, want %q", destination, expected)
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatalf("no request for %q reached the SS2022 exit", expected)
-		}
-	}
-	request := func(authority string, proxyURL *url.URL, addresses ...string) error {
-		transport := target.Client().Transport.(*http.Transport).Clone()
-		transport.Proxy = nil
-		if proxyURL != nil {
-			transport.Proxy = http.ProxyURL(proxyURL)
-		}
-		if len(addresses) > 0 {
-			transport.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
-				dialer := &net.Dialer{Timeout: 2 * time.Second}
-				var err error
-				for _, addr := range addresses {
-					var conn net.Conn
-					conn, err = dialer.DialContext(ctx, "tcp", addr)
-					if err == nil {
-						return conn, nil
-					}
-				}
-				return nil, err
-			}
-		}
-		transport.DisableKeepAlives = true
-		defer transport.CloseIdleConnections()
-		client := http.Client{Transport: transport, Timeout: 6 * time.Second}
-		resp, err := client.Get("https://" + authority + "/")
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		payload, err := io.ReadAll(resp.Body)
-		if resp.StatusCode != http.StatusOK || string(payload) != marker {
-			return fmt.Errorf("unexpected HTTPS response %s (%q)", resp.Status, payload)
-		}
-		return err
-	}
 	hasTUNIPv6Route := func() bool {
 		t.Helper()
 		luid, _, err := findTUNAdapter()
@@ -296,27 +186,27 @@ rules:
 	}
 	localProxy := &url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(port))}
 	start(ModeSystem)
-	if err := request(hostname, localProxy); err != nil {
+	if err := peer.request(hostname, localProxy); err != nil {
 		t.Fatalf("system proxy could not reach the IPv4-only SS2022 exit: %v", err)
 	}
-	checkExit(hostname + ":443")
+	peer.checkExit(t, hostname+":443")
 	// Exercise the old form of the SS2022 destination on the same ready
 	// proxy. Windows CI has no native global IPv6 route for the legacy TUN.
-	if err := request(ipv6, localProxy); err == nil {
+	if err := peer.request(ipv6, localProxy); err == nil {
 		t.Fatal("the IPv4-only SS2022 exit accepted a raw IPv6 destination")
 	}
-	checkExit(ipv6)
+	peer.checkExit(t, ipv6)
 	stop()
 
 	start(ModeTUN)
 	if hasTUNIPv6Route() {
 		t.Fatal("IPv4-only TUN installed an IPv6 default route")
 	}
-	if err := request(hostname, nil, ipv6); err == nil {
+	if err := peer.request(hostname, nil, ipv6); err == nil {
 		t.Fatal("IPv4-only TUN allowed the raw IPv6 connection")
 	}
 	select {
-	case address := <-seen:
+	case address := <-peer.seen:
 		t.Fatalf("IPv4-only TUN forwarded unexpected destination %q", address)
 	default:
 	}
@@ -324,9 +214,9 @@ rules:
 	// Allow that startup transition, while failing any rejected request that
 	// actually made it to the exit instead of hiding a destination error.
 	deadline := time.Now().Add(4 * time.Second)
-	for err := request(hostname, nil, ipv6, ipv4); err != nil; err = request(hostname, nil, ipv6, ipv4) {
+	for err := peer.request(hostname, nil, ipv6, ipv4); err != nil; err = peer.request(hostname, nil, ipv6, ipv4) {
 		select {
-		case address := <-seen:
+		case address := <-peer.seen:
 			t.Fatalf("TUN sent %q to the IPv4-only exit, but HTTPS failed: %v", address, err)
 		default:
 		}
@@ -335,9 +225,9 @@ rules:
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	checkExit(ipv4)
-	stopPeer()
-	if err := request(hostname, nil, ipv4); err == nil {
+	peer.checkExit(t, ipv4)
+	peer.stop()
+	if err := peer.request(hostname, nil, ipv4); err == nil {
 		t.Fatal("TUN traffic bypassed the stopped SS2022 peer")
 	}
 }

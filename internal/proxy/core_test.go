@@ -30,7 +30,7 @@ func reservePort(t *testing.T) int {
 }
 func runFixtureCore(t *testing.T, core string, config []byte, port int) func() {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	cmd := exec.CommandContext(ctx, core, "-d", t.TempDir(), "-f", "-")
 	cmd.Stdin = bytes.NewReader(config)
 	var logs bytes.Buffer

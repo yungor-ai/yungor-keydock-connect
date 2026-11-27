@@ -101,6 +101,8 @@ func (c *Controller) devicePath() string { return filepath.Join(c.stateDir, "dev
 
 func (c *Controller) snapshot() enrollment { c.mu.RLock(); defer c.mu.RUnlock(); return c.device }
 
+func (c *Controller) ServerURL() string { return c.snapshot().ServerURL }
+
 func (c *Controller) ProxyAddress() string {
 	if local, ok := c.proxy.(interface{ ProxyAddress() string }); ok {
 		return local.ProxyAddress()

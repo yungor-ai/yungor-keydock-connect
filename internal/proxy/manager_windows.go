@@ -343,6 +343,14 @@ func (m *Manager) startProfileLocked(body []byte) error {
 	return m.startSubscriptionLocked(context.Background(), body, ModeSystem)
 }
 
+func (m *Manager) windowsProfile(body []byte, port int, mode Mode) ([]byte, error) {
+	var serverURL string
+	if mode == ModeTUN && m.EnrolledServer != nil {
+		serverURL = m.EnrolledServer()
+	}
+	return buildRoutingProfileWithTUN(body, port, false, mode, nil, serverURL)
+}
+
 func (m *Manager) startSubscriptionLocked(ctx context.Context, body []byte, mode Mode) error {
 	started := time.Now()
 	port, err := loopbackPort()
@@ -351,7 +359,7 @@ func (m *Manager) startSubscriptionLocked(ctx context.Context, body []byte, mode
 		return err
 	}
 	started = time.Now()
-	cfg, err := buildModeProfile(body, port, mode)
+	cfg, err := m.windowsProfile(body, port, mode)
 	m.logStage("proxy.profile", started, err)
 	if err != nil {
 		return err
@@ -488,7 +496,7 @@ func (m *Manager) refresh(ctx context.Context, raw string, tlsConfig *tls.Config
 	if err != nil {
 		return err
 	}
-	cfg, err := buildModeProfile(body, prior.port, prior.mode)
+	cfg, err := m.windowsProfile(body, prior.port, prior.mode)
 	if err != nil {
 		return err
 	}

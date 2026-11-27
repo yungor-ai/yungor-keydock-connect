@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -122,7 +123,7 @@ allow-lan: true
 	if err := yaml.Unmarshal(tunnel, &tun); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"dns", "interface-name", "external-controller"} {
+	for _, key := range []string{"interface-name", "external-controller"} {
 		if _, found := tun[key]; found {
 			t.Fatalf("feed runtime setting %q survived sanitization", key)
 		}
@@ -132,7 +133,7 @@ allow-lan: true
 	}
 	wantTUN := map[string]any{
 		"enable": true, "device": "KeyDockTun", "stack": "mips", "auto-route": true,
-		"auto-detect-interface": true, "strict-route": true, "dns-mode": "disabled", "dns-hijack": []any{}, "mtu": 1500,
+		"auto-detect-interface": true, "strict-route": true, "dns-mode": "native", "dns-hijack": []any{}, "mtu": 1500,
 	}
 	if !reflect.DeepEqual(tun["tun"], wantTUN) {
 		t.Fatalf("unexpected TUN settings: %v", tun["tun"])
@@ -156,6 +157,16 @@ allow-lan: true
 	delete(tun, "tun")
 	delete(tun, "sniffer")
 	delete(tun, "ipv6")
+	if tun["dns"] == nil || system["dns"] != nil {
+		t.Fatal("only TUN should manage Windows DNS")
+	}
+	delete(tun, "dns")
+	groups, ok := tun["proxy-groups"].([]any)
+	if !ok || len(groups) == 0 {
+		t.Fatal("missing TUN proxy groups")
+	}
+	// TUN appends one local group for DNS. Every subscription group must survive.
+	tun["proxy-groups"] = groups[:len(groups)-1]
 	if !reflect.DeepEqual(tun, system) {
 		t.Fatal("TUN changed subscription routing or exposed the loopback listener")
 	}
@@ -227,15 +238,13 @@ func TestDiagnosticProfileForcesOnlyDeviceNode(t *testing.T) {
 	}
 }
 
-func TestNativeTUNDNSUsesOnlyTrustedIPv4Upstreams(t *testing.T) {
+func TestWindowsTUNDNSUsesOnlyTrustedIPv4Upstreams(t *testing.T) {
 	// Labels are valid subscription data but unsafe to embed in a DoH fragment.
 	const node = "name&key=value"
 	src := strings.ReplaceAll(fixture, "test-node", node)
 	src = strings.ReplaceAll(src, "Auto", "KeyDock-DNS")
 	src += "dns: {listen: '0.0.0.0:53', ipv6: true, nameserver: ['https://untrusted.invalid/dns-query']}\n"
-	tun := makeTUNSettings("utun3917")
-	tun.DNSMode = "native"
-	raw, err := buildRoutingProfileWithTUN([]byte(src), 0, false, ModeTUN, tun)
+	raw, err := buildModeProfile([]byte(src), 23456, ModeTUN)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +258,7 @@ func TestNativeTUNDNSUsesOnlyTrustedIPv4Upstreams(t *testing.T) {
 	dns := cfg.DNS
 	if !dns.Enable || dns.IPv6 || dns.EnhancedMode != "fake-ip" || dns.FakeIPRange != "198.18.0.1/16" ||
 		bytes.Contains(raw, []byte("untrusted.invalid")) || bytes.Contains(raw, []byte("listen:")) {
-		t.Fatal("native TUN DNS must use the owned IPv4 configuration")
+		t.Fatal("Windows TUN DNS must use the owned IPv4 configuration")
 	}
 	alias := cfg.Groups[len(cfg.Groups)-1]
 	if alias.Name != "KeyDock-DNS-1" || alias.Type != "select" || !reflect.DeepEqual(alias.Proxies, []string{node}) ||
@@ -258,5 +267,42 @@ func TestNativeTUNDNSUsesOnlyTrustedIPv4Upstreams(t *testing.T) {
 	}
 	if len(dns.ProxyServerNameServer) == 0 || !reflect.DeepEqual(dns.ProxyServerNameServer, dns.DefaultNameServer) {
 		t.Fatal("relay bootstrap must work before the relay is connected")
+	}
+}
+
+func TestWindowsTUNDNSReturnsRealIPOnlyForEnrolledServer(t *testing.T) {
+	const backend = "keydock.example.com"
+	const feed = fixture + "dns: {fake-ip-filter: ['+.example.com']}\n"
+	profileFilters := func(serverURL string) []string {
+		t.Helper()
+		raw, err := buildRoutingProfileWithTUN([]byte(feed), 23456, false, ModeTUN, nil, serverURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cfg struct {
+			DNS dnsSettings `yaml:"dns"`
+		}
+		if err = yaml.Unmarshal(raw, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		return cfg.DNS.FakeIPFilter
+	}
+	defaults := profileFilters("")
+	if slices.Contains(defaults, "+.example.com") || slices.Contains(defaults, backend) {
+		t.Fatal("the subscription must not choose DNS exceptions")
+	}
+	for _, tc := range []struct {
+		server string
+		want   []string
+	}{
+		{"https://KeyDock.Example.com.:8443/base", append(slices.Clone(defaults), backend)},
+		{"https://192.0.2.11", defaults},
+		{"https://[2001:db8::11]", defaults},
+		{"https://*.example.com", defaults},
+		{"https://user@keydock.example.com", defaults},
+	} {
+		if got := profileFilters(tc.server); !slices.Equal(got, tc.want) {
+			t.Errorf("unexpected DNS exceptions for %q: %v", tc.server, got)
+		}
 	}
 }

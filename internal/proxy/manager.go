@@ -20,6 +20,9 @@ const (
 )
 
 type Manager struct {
+	// EnrolledServer returns the current KeyDock base URL for DNS exceptions.
+	// The desktop sets it before starting the manager's network operations.
+	EnrolledServer     func() string
 	mu                 sync.Mutex
 	scratch            sync.RWMutex
 	stateDir, corePath string
