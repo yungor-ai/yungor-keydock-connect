@@ -37,7 +37,8 @@ type nativeWindow struct {
 	clockHint                     *walk.TextLabel
 	troubleshootingNotice         *walk.TextLabel
 	troubleshooting               *walk.Composite
-	proxyState, proxyUpdatedAt    *walk.Label
+	proxyState                    *walk.Label
+	proxyUpdatedAt                *walk.TextLabel
 	proxyModes                    *walk.ComboBox
 	rows                          []*checkRow
 	colors                        windowColors

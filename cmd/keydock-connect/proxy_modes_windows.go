@@ -76,13 +76,13 @@ func (ui *nativeWindow) renderProxy() {
 	}
 	ui.setNotice(ui.tunHint, tunHelp, ui.colors.muted)
 
-	refreshHint := ""
+	updatedLabel, refreshHint := "", ""
 	if ui.state.Subscription {
 		lastUpdate := "尚未更新"
 		if updatedAt := ui.state.SubscriptionUpdatedAt; !updatedAt.IsZero() {
 			lastUpdate = updatedAt.Local().Format("2006-01-02 15:04:05")
 		}
-		ui.proxyUpdatedAt.SetText("最近更新时间 " + lastUpdate)
+		updatedLabel = "最近更新时间 " + lastUpdate
 		if active {
 			refreshHint = "订阅每小时自动刷新。"
 		}
@@ -93,7 +93,7 @@ func (ui *nativeWindow) renderProxy() {
 			}
 		}
 	}
-	ui.setControlVisible(ui.proxyUpdatedAt, ui.state.Subscription)
+	ui.setNotice(ui.proxyUpdatedAt, updatedLabel, ui.colors.muted)
 	refreshColor := ui.colors.muted
 	if ui.state.SubscriptionRefreshFailed {
 		refreshColor = ui.colors.danger

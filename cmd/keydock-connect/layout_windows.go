@@ -73,13 +73,14 @@ func (ui *nativeWindow) build(icon *walk.Icon) error {
 		Background: colors.header,
 		MinSize:    d.Size{Height: 64},
 		MaxSize:    d.Size{Height: 64},
-		Layout:     d.HBox{Margins: d.Margins{Left: 22, Top: 9, Right: 22, Bottom: 10}, Spacing: 12},
+		Layout:     d.HBox{Margins: d.Margins{Left: 22, Top: 9, Right: 22, Bottom: 10}, Spacing: 12, Alignment: d.AlignHNearVCenter},
 		Children: []d.Widget{
 			d.ImageView{Image: icon, Mode: d.ImageViewModeZoom, MinSize: d.Size{Width: 40, Height: 40}, MaxSize: d.Size{Width: 40, Height: 40}},
 			d.Composite{Layout: d.VBox{MarginsZero: true, Spacing: 2}, Children: []d.Widget{
 				d.Label{Text: "KeyDock Connect", Font: uiFont(16, true), TextColor: colors.ink},
 				d.Label{AssignTo: &ui.device, TextColor: colors.muted, NoPrefix: true, EllipsisMode: d.EllipsisEnd},
 			}},
+			d.HSpacer{},
 		},
 	}
 	fieldLayout := d.VBox{MarginsZero: true, Spacing: 4}
@@ -123,8 +124,7 @@ func (ui *nativeWindow) build(icon *walk.Icon) error {
 			}},
 			note(&ui.proxyHint),
 			note(&ui.tunHint),
-			d.Label{AssignTo: &ui.proxyUpdatedAt, Font: uiFont(10, false), TextColor: colors.muted,
-				MinSize: d.Size{Width: 250}},
+			note(&ui.proxyUpdatedAt),
 			note(&ui.subscriptionHint),
 			note(&ui.proxyNotice),
 		},
