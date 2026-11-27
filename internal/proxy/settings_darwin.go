@@ -3,13 +3,15 @@
 package proxy
 
 /*
-int kdSystemProxyUpdate(int enable, int port);
+#include <SystemConfiguration/SystemConfiguration.h>
+int kdSystemProxyUpdate(int enable, int port, int *detail);
 */
 import "C"
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -22,25 +24,33 @@ func updateDarwinSystemProxy(enabled bool) error {
 	}
 	// Another writer can briefly own the preferences lock (or change the
 	// preferences signature between the read and lock). Use a fresh session.
-	status := C.kdSystemProxyUpdate(enable, localPort)
+	var detail C.int
+	status := C.kdSystemProxyUpdate(enable, localPort, &detail)
 	for deadline := time.Now().Add(2 * time.Second); status == 2 && time.Now().Before(deadline); {
 		time.Sleep(50 * time.Millisecond)
-		status = C.kdSystemProxyUpdate(enable, localPort)
+		status = C.kdSystemProxyUpdate(enable, localPort, &detail)
 	}
+	message := ""
 	switch status {
 	case 0:
 		return nil
 	case 1:
 		return errNoDarwinProxyService
 	case 2:
-		return errors.New("macOS 网络设置正在使用或无法访问，请稍后重试")
+		message = "macOS 网络设置正在使用，请稍后重试"
 	case 3:
-		return errors.New("macOS 尚未恢复原系统代理设置，请稍后重试")
+		message = "macOS 尚未恢复原系统代理设置，请稍后重试"
 	case 5:
 		return errors.New("系统代理设置已被更改，KeyDock 已停止接管")
+	case 6:
+		message = "无法访问 macOS 网络设置，请检查后台服务授权"
 	default:
-		return errors.New("macOS 未能启用 HTTP、HTTPS 和 SOCKS 系统代理，请检查当前网络服务后重试")
+		message = "macOS 未能启用 HTTP、HTTPS 和 SOCKS 系统代理，请检查当前网络服务后重试"
 	}
+	if detail != C.kSCStatusOK {
+		return fmt.Errorf("%s（%s，%d）", message, C.GoString(C.SCErrorString(detail)), detail)
+	}
+	return errors.New(message)
 }
 
 func runDarwinSystemProxy(ctx context.Context, ready func() error) (result error) {

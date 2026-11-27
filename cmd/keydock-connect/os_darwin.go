@@ -195,7 +195,7 @@ func kdMacAction(action C.int, first, second *C.char) {
 		case C.KD_PROXY:
 			enable := firstValue == "on"
 			mode := proxy.Mode(secondValue)
-			message, err = setMacProxyMode(controller, enable, mode)
+			message, err = setMacProxyMode(ctx, controller, enable, mode)
 		case C.KD_RESTORE:
 			err = controller.Restore()
 			message = "已恢复原 Codex 配置"
@@ -232,7 +232,7 @@ func kdMacResumeActions() {
 	window.actionLifetime, window.stopActions = context.WithCancel(window.lifetime)
 }
 
-func setMacProxyMode(controller *desktop.Controller, enable bool, mode proxy.Mode) (string, error) {
+func setMacProxyMode(ctx context.Context, controller *desktop.Controller, enable bool, mode proxy.Mode) (string, error) {
 	var label string
 	switch mode {
 	case proxy.ModeSystem:
@@ -243,7 +243,7 @@ func setMacProxyMode(controller *desktop.Controller, enable bool, mode proxy.Mod
 		return "", errors.New("无效的代理模式")
 	}
 	if enable {
-		if err := authorizeDarwinProxyService(); err != nil {
+		if err := authorizeDarwinProxyService(ctx); err != nil {
 			return "", err
 		}
 	}

@@ -133,10 +133,14 @@ static BOOL installReceipt(SCPreferencesRef prefs, NSString *serviceID, NSDictio
 
 // Called only by the signed, privileged daemon. No network settings or ports
 // are accepted from the IPC peer. Errors are returned to the GUI as stages.
-int kdSystemProxyUpdate(int enable, int port) {
+int kdSystemProxyUpdate(int enable, int port, int *detail) {
     @autoreleasepool {
+        *detail = kSCStatusOK;
         SCPreferencesRef prefs = SCPreferencesCreate(NULL, CFSTR("KeyDock Connect"), NULL);
-        if (!prefs) return 2;
+        if (!prefs) {
+            *detail = SCError();
+            return 6;
+        }
         NSDictionary *receipt = (__bridge NSDictionary *)SCPreferencesGetValue(prefs, receiptKey);
         NSString *active = enable ? primaryService(prefs) : nil;
         int result = 0;
@@ -149,7 +153,8 @@ int kdSystemProxyUpdate(int enable, int port) {
             if (proxy) CFRelease(proxy);
             result = owns ? 0 : 5;
         } else if (!SCPreferencesLock(prefs, false)) {
-            result = 2;
+            *detail = SCError();
+            result = *detail == kSCStatusPrefsBusy || *detail == kSCStatusStale ? 2 : 6;
         } else {
             SCPreferencesSynchronize(prefs);
             receipt = (__bridge NSDictionary *)SCPreferencesGetValue(prefs, receiptKey);
@@ -162,6 +167,7 @@ int kdSystemProxyUpdate(int enable, int port) {
             } else if (active && ![active isEqual:receipt[@"service"]] && !installReceipt(prefs, active, owned)) {
                 result = 4;
             }
+            if (result == 3 || result == 4) *detail = SCError();
             SCPreferencesUnlock(prefs);
         }
         CFRelease(prefs);

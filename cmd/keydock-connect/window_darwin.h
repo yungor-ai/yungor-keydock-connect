@@ -30,6 +30,7 @@ void kdSetState(const char *server, const char *device, const char *model,
                 int paired, int restorable, int subscription, int proxyMode,
                 const char *updatedAt, int refreshFailed);
 void kdSetCheck(int row, const char *status, const char *message, const char *hint);
+void kdSetProxyApprovalProgress(int waiting);
 void kdFinishOperation(const char *message, int failed);
 void kdOfferUpdate(const char *version);
 void kdSetUpdateProgress(const char *message);

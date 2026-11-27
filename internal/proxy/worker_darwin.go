@@ -34,7 +34,7 @@ var workerFailures = [...]string{
 // pinned native core with a validated, loopback-only KeyDock profile.
 // A parent-owned pipe makes an unexpected exit equivalent to stopping it.
 func RunWorker(args []string) (bool, error) {
-	if len(args) == 1 && args[0] == "--tun-daemon" {
+	if (len(args) == 1 || len(args) == 2) && args[0] == "--tun-daemon" {
 		return true, runDarwinTUNService()
 	}
 	if len(args) == 0 || args[0] != "--proxy-worker" {

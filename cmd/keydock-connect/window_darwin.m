@@ -759,6 +759,16 @@ void kdSetCheck(int row, const char *status, const char *message, const char *hi
     }
 }
 
+void kdSetProxyApprovalProgress(int waiting) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!ui.quitting && ui.busy) {
+            NSString *message = waiting ? @"请在系统设置中允许 KeyDock Connect 在后台运行，批准后会自动继续。" :
+                                          @"后台服务已获准，正在启用代理…";
+            [ui showNotice:message failure:NO inField:ui.proxyNotice];
+        }
+    });
+}
+
 void kdFinishOperation(const char *message, int failed) {
     @autoreleasepool {
         NSString *notice = str(message);

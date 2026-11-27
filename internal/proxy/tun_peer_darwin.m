@@ -78,6 +78,19 @@ void *kdTUNListen(const char *requirement) {
                 uid_t uid = xpc_connection_get_euid(sender);
                 bool accepted = false;
                 if (kdTUNConsoleUser(uid)) {
+                    if (xpc_dictionary_get_bool(message, "registration")) {
+                        NSBundle *bundle = NSBundle.mainBundle;
+                        const char *path = xpc_dictionary_get_string(message, "bundle");
+                        const char *version = xpc_dictionary_get_string(message, "version");
+                        NSArray *args = NSProcessInfo.processInfo.arguments;
+                        NSString *registered = args.count == 3 ? args.lastObject : @"";
+                        BOOL sameBundle = path && [bundle.bundleURL.URLByResolvingSymlinksInPath.path isEqualToString:@(path)];
+                        BOOL current = version && [registered isEqualToString:@(version)]
+                            && [registered isEqual:[bundle objectForInfoDictionaryKey:@"CFBundleVersion"]];
+                        xpc_dictionary_set_int64(reply, "registration", !sameBundle ? 4 : current ? 1 : 2);
+                        xpc_connection_send_message(sender, reply);
+                        return;
+                    }
                     int fd = xpc_dictionary_dup_fd(message, "lease");
                     if (fd >= 0) {
                         accepted = fcntl(fd, F_SETFD, FD_CLOEXEC) != -1 && kdTUNEnqueue(fd, uid);
@@ -99,7 +112,7 @@ void kdTUNStopListening(void *handle) {
     xpc_connection_cancel(listener);
 }
 
-bool kdTUNRequest(int fd, const char *requirement) {
+int kdTUNRequest(int fd, const char *requirement) {
     @autoreleasepool {
         xpc_connection_t peer = xpc_connection_create_mach_service(serviceName, NULL, XPC_CONNECTION_MACH_SERVICE_PRIVILEGED);
         if (!peer) return false;
@@ -110,15 +123,37 @@ bool kdTUNRequest(int fd, const char *requirement) {
         xpc_connection_set_event_handler(peer, ^(xpc_object_t event) {});
         xpc_connection_resume(peer);
         xpc_object_t request = xpc_dictionary_create(NULL, NULL, 0);
-        xpc_dictionary_set_fd(request, "lease", fd);
+        if (fd >= 0) {
+            xpc_dictionary_set_fd(request, "lease", fd);
+        } else {
+            if (!kdTUNConsoleUser(geteuid())) {
+                xpc_connection_cancel(peer);
+                return 0;
+            }
+            NSBundle *bundle = NSBundle.mainBundle;
+            NSString *version = [bundle objectForInfoDictionaryKey:@"CFBundleVersion"];
+            if (!version.length) {
+                xpc_connection_cancel(peer);
+                return 0;
+            }
+            xpc_dictionary_set_bool(request, "registration", true);
+            xpc_dictionary_set_string(request, "bundle", bundle.bundleURL.URLByResolvingSymlinksInPath.path.UTF8String);
+            xpc_dictionary_set_string(request, "version", version.UTF8String);
+        }
         dispatch_semaphore_t ready = dispatch_semaphore_create(0);
-        __block bool accepted = false;
+        __block int result = 0;
         xpc_connection_send_message_with_reply(peer, request, NULL, ^(xpc_object_t response) {
-            accepted = xpc_get_type(response) == XPC_TYPE_DICTIONARY && xpc_dictionary_get_bool(response, "accepted");
+            if (xpc_get_type(response) == XPC_TYPE_DICTIONARY) {
+                if (fd >= 0) result = xpc_dictionary_get_bool(response, "accepted") ? 1 : 0;
+                else if (xpc_dictionary_get_value(response, "registration")) result = (int)xpc_dictionary_get_int64(response, "registration");
+                // v0.4.6 only knows the "lease" request. The signed old service
+                // replies accepted=false to the read-only registration query.
+                else if (xpc_dictionary_get_value(response, "accepted")) result = 3;
+            }
             dispatch_semaphore_signal(ready);
         });
         bool received = dispatch_semaphore_wait(ready, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) == 0;
         xpc_connection_cancel(peer);
-        return received && accepted;
+        return received ? result : 0;
     }
 }

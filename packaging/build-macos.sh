@@ -67,6 +67,7 @@ plutil -insert CFBundleShortVersionString -string "$version" "$plist"
 plutil -insert CFBundleVersion -string "$version" "$plist"
 plutil -lint "$plist"
 cp packaging/macos-tun-launchd.plist "$daemon_plist"
+plutil -insert ProgramArguments.2 -string "$version" "$daemon_plist"
 plutil -lint "$daemon_plist"
 
 iconset="$stage/KeyDock.iconset"

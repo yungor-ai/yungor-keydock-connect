@@ -12,7 +12,7 @@ char *kdTUNCopyRequirement(void);
 bool kdTUNConsoleUser(uid_t);
 void *kdTUNListen(const char *);
 void kdTUNStopListening(void *);
-bool kdTUNRequest(int, const char *);
+int kdTUNRequest(int, const char *);
 */
 import "C"
 
@@ -82,7 +82,7 @@ func requestDarwinTUNChannel() (*net.UnixConn, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !bool(C.kdTUNRequest(C.int(peer.Fd()), requirement)) {
+	if C.kdTUNRequest(C.int(peer.Fd()), requirement) != 1 {
 		_ = conn.Close()
 		return nil, errors.New("无法连接 KeyDock 网络后台服务，请稍后重试。若仍失败，请检查后台项目授权并使用当前登录的 macOS 会话")
 	}
@@ -186,7 +186,7 @@ func runDarwinTUNService() error {
 					if darwinTUNExecutableChanged(executable, original) {
 						return errDarwinTUNRestart
 					}
-					return runDarwinNetworkService(ctx, corePath, body, ready)
+					return serveRegisteredDarwinService(ctx, os.Args[1:], corePath, body, ready)
 				})
 				// The session is free before teardown is acknowledged.
 				lease.Unlock()
@@ -194,6 +194,15 @@ func runDarwinTUNService() error {
 			}()
 		}
 	}
+}
+
+func probeDarwinRegistration() int {
+	requirement := C.kdTUNCopyRequirement()
+	if requirement == nil {
+		return 0
+	}
+	defer C.free(unsafe.Pointer(requirement))
+	return int(C.kdTUNRequest(-1, requirement))
 }
 
 func runDarwinNetworkService(ctx context.Context, corePath string, body []byte, ready func() error) error {
