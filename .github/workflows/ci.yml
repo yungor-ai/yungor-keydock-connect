@@ -1,217 +1,64 @@
-name: Build and release desktop installers
+name: Stage verified Windows packages in v0.4.10 draft
 
 on:
-  pull_request:
   push:
-    branches: ["**"]
-    tags: ["v*"]
-  workflow_dispatch:
+    branches: ["ci/stage-windows-assets-v0.4.10"]
 
 permissions:
-  contents: read
+  actions: read
+  contents: write
 
 jobs:
-  release-tag:
-    if: github.event_name == 'push' && github.ref_type == 'tag' && github.event.created && !github.event.deleted
+  windows-assets:
     runs-on: ubuntu-latest
-    outputs:
-      commit: ${{ steps.validate.outputs.commit }}
+    timeout-minutes: 6
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: yungor-ai/yungor-keydock-connect
+      SHA: a5cbd8fe968aaebfa37b6d4daf26c4bb9fe4af4d
+      DRAFT: "460132911"
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Verify tag version and default branch ancestry
-        id: validate
-        shell: bash
-        env:
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      - name: Check source run and draft
         run: |
-          version=$(<VERSION)
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || "$GITHUB_REF_NAME" != "v$version" ]]; then
-            echo 'The release tag must be v followed by the version in VERSION.' >&2
-            exit 1
-          fi
-          git merge-base --is-ancestor HEAD "refs/remotes/origin/$DEFAULT_BRANCH"
-          printf 'commit=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+          set -euo pipefail
+          gh api "repos/$REPO/actions/runs/45934477603" | jq -e --arg sha "$SHA" '.head_sha==$sha and .conclusion=="success" and .head_repository.full_name=="yungor-ai/yungor-keydock-connect"'
+          gh api "repos/$REPO/actions/runs/45934477603/artifacts" | jq -e 'any(.artifacts[]; .id==15170237832 and .name=="KeyDockConnect-windows-x64" and .expired==false)'
+          gh api "repos/$REPO/releases/$DRAFT" | jq -e --arg sha "$SHA" '.id==460132911 and .tag_name=="v0.4.10" and .draft and .target_commitish==$sha'
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3
         with:
-          persist-credentials: false
-      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
-        with:
-          go-version-file: go.mod
-      - run: go vet ./...
-      - run: go test -race ./...
-
-  macos:
-    runs-on: macos-15
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
-        with:
-          go-version-file: go.mod
-      - run: go vet ./...
-      - name: Build and verify macOS arm64 disk image
-        run: bash packaging/build-macos.sh
-      - name: Test with the bundled Apple Silicon proxy core
-        env:
-          KEYDOCK_TEST_CORE: ${{ github.workspace }}/dist/macos/KeyDock Connect.app/Contents/Resources/core/mihomo
-          KEYDOCK_PROFILE_CORE: ${{ github.workspace }}/dist/macos/KeyDock Connect.app/Contents/Resources/core/mihomo
-          KEYDOCK_GEO_DIR: ${{ github.workspace }}/dist/macos/KeyDock Connect.app/Contents/Resources/core
-        run: go test -race ./...
-      - name: Verify macOS system proxy and IPv4 TUN on the disposable runner
-        run: |
-          go test -c -o "$RUNNER_TEMP/keydock-proxy.test" ./internal/proxy
-          sudo env KEYDOCK_MACOS_SYSTEM_PROXY_E2E=1 "$RUNNER_TEMP/keydock-proxy.test" \
-            -test.v -test.run '^TestDarwinSystemProxyPreferencesLifecycle$'
-          sudo env KEYDOCK_DARWIN_TUN_E2E=1 KEYDOCK_DARWIN_DNS_E2E=1 KEYDOCK_TEST_CORE="$PWD/dist/macos/KeyDock Connect.app/Contents/Resources/core/mihomo" \
-            "$RUNNER_TEMP/keydock-proxy.test" -test.v -test.run '^TestDarwinTUN(Route|SystemDNS)Lifecycle$'
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: KeyDockConnect-macos-arm64
-          path: |
-            dist/macos/KeyDockConnect-macos-arm64.dmg
-            dist/macos/SHA256SUMS.txt
-          if-no-files-found: error
-
-  macos-release:
-    needs: [release-tag, macos]
-    runs-on: macos-15
-    timeout-minutes: 90
-    environment: macos-release
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.release-tag.outputs.commit }}
-          persist-credentials: false
-      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
-        with:
-          go-version-file: go.mod
-      - name: Sign and notarize the Apple Silicon disk image
-        env:
-          MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
-          MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
-          MACOS_NOTARY_KEY_BASE64: ${{ secrets.MACOS_NOTARY_KEY_BASE64 }}
-          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
-          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
-        run: bash packaging/sign-macos-in-ci.sh
-      - name: Test proxy startup against the signed payload
-        shell: bash
-        run: |
-          core="$PWD/dist/macos/KeyDock Connect.app/Contents/Resources/core/mihomo"
-          checksum=$(shasum -a 256 "$core")
-          KEYDOCK_TEST_CORE="$core" KEYDOCK_PROFILE_CORE="$core" KEYDOCK_GEO_DIR="$(dirname "$core")" go test -race -count=1 \
-            -ldflags "-X github.com/yungor-ai/yungor-keydock-connect/internal/proxy.coreDigest=${checksum%% *}" \
-            ./internal/proxy
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: KeyDockConnect-macos-arm64-notarized
-          path: |
-            dist/macos/KeyDockConnect-macos-arm64.dmg
-            dist/macos/SHA256SUMS.txt
-          if-no-files-found: error
-
-  windows:
-    runs-on: windows-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
-        with:
-          go-version-file: go.mod
-      - name: Prepare verified proxy core and offline routing data
-        run: python scripts/package-core.py dist/app
-      - name: Test on the disposable Windows desktop
-        env:
-          KEYDOCK_WINDOWS_PROXY_E2E: "1"
-        run: |
-          $env:KEYDOCK_TEST_CORE = (Resolve-Path "dist/app/core/mihomo.exe").Path
-          go test -count=1 -v ./...
-      - name: Verify Windows TUN route lifecycle
-        env:
-          KEYDOCK_WINDOWS_TUN_E2E: "1"
-        run: |
-          $env:KEYDOCK_TEST_CORE = (Resolve-Path "dist/app/core/mihomo.exe").Path
-          go test -count=1 -v -ldflags="-H=windowsgui" -run '^TestWindowsTUN(RoutesAndWinINetRestore|CoreStartupFailure)$' ./internal/proxy
-      - name: Build Windows x64 GUI
-        env:
-          GOARCH: amd64
-          CGO_ENABLED: "0"
-        run: go build -trimpath -ldflags="-H=windowsgui -s -w" -o dist/app/KeyDockConnect.exe ./cmd/keydock-connect
-      - name: Build Windows installer and portable package
-        shell: pwsh
-        run: ./packaging/build-installer.ps1
-      - name: Verify installed application and safe uninstall
-        timeout-minutes: 8
-        shell: powershell
-        run: ./packaging/smoke-installer.ps1
-      - name: Preserve available Windows UI evidence
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: KeyDockConnect-Windows-UI
-          path: |
-            dist/installer/smoke-diagnostics.txt
-            dist/installer/screenshots/*.png
-          if-no-files-found: ignore
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
+          repository: yungor-ai/yungor-keydock-connect
+          run-id: 45934477603
+          github-token: ${{ github.token }}
           name: KeyDockConnect-windows-x64
-          path: |
-            dist/installer/KeyDockConnect-Setup-windows-x64.exe
-            dist/installer/KeyDockConnect-windows-x64.zip
-            dist/installer/SHA256SUMS.txt
-            dist/installer/KeyDockConnect-window.png
-            dist/installer/screenshots/*.png
-          if-no-files-found: error
-
-  publish:
-    needs: [release-tag, test, windows, macos-release]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    concurrency:
-      group: keydock-release-${{ github.ref }}
-      cancel-in-progress: false
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.release-tag.outputs.commit }}
-          persist-credentials: false
-      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
-        with:
-          name: KeyDockConnect-windows-x64
-          path: dist/release/windows
-      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
-        with:
-          name: KeyDockConnect-macos-arm64-notarized
-          path: dist/release/macos
-      - name: Verify and stage both platforms with one checksum manifest
-        run: bash packaging/prepare-release-assets.sh dist/release/windows dist/release/macos dist/release/assets
-      - name: Publish one release for the verified tag
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_COMMIT: ${{ needs.release-tag.outputs.commit }}
+          path: verified
+      - name: Verify both packages and stage only the two Windows draft assets
+        working-directory: verified
         run: |
-          tag_ref="refs/tags/$GITHUB_REF_NAME"
-          remote_tag=$(git ls-remote --exit-code origin "$tag_ref" "$tag_ref^{}")
-          tag_commit=$(awk -v ref="$tag_ref" '$2 == ref { direct = $1 } $2 == ref "^{}" { peeled = $1 } END { print peeled ? peeled : direct }' <<< "$remote_tag")
-          if [[ "$tag_commit" != "$RELEASE_COMMIT" ]]; then
-            echo 'Release tag has changed since validation.' >&2
-            exit 1
-          fi
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes \
-            dist/release/assets/KeyDockConnect-Setup-windows-x64.exe \
-            dist/release/assets/KeyDockConnect-windows-x64.zip \
-            dist/release/assets/KeyDockConnect-macos-arm64.dmg \
-            dist/release/assets/SHA256SUMS.txt
+          set -euo pipefail
+          installer='KeyDockConnect-Setup-windows-x64.exe'
+          portable='KeyDockConnect-windows-x64.zip'
+          exe_sha='7c70bd6b6a50239c5f9ef73ce126d62f24057003e2993ddc0ad2390ae6b59aff'
+          zip_sha='e84b70a4e2984dd25611d91481ea57446235b775c4ceb4782218d6d35c688e11'
+          printf '%s  %s\n' "$exe_sha" "$installer" "$zip_sha" "$portable" > "$RUNNER_TEMP/expected.txt"
+          sha256sum -c "$RUNNER_TEMP/expected.txt"
+          cmp "$RUNNER_TEMP/expected.txt" <(tr -d '\r' < SHA256SUMS.txt)
+          stage() {
+            local name="$1" expected="sha256:$2" starter_id="$3" type="$4" size asset
+            size=$(stat -c %s -- "$name")
+            gh api "repos/$REPO/releases/$DRAFT" | jq -e --arg sha "$SHA" '.id==460132911 and .tag_name=="v0.4.10" and .draft and .target_commitish==$sha'
+            asset=$(gh api "repos/$REPO/releases/$DRAFT/assets" | jq -ec --arg name "$name" '[.[]|select(.name==$name)] | if length<=1 then (.[0] // {}) else error("duplicate asset") end')
+            if jq -e --arg digest "$expected" --argjson size "$size" '.state=="uploaded" and .digest==$digest and .size==$size' <<< "$asset" >/dev/null; then
+              echo "$name already verified in draft"
+              return
+            fi
+            if ! jq -e 'length==0' <<< "$asset" >/dev/null; then
+              jq -e --argjson id "$starter_id" '.id==$id and .state=="starter" and (.digest==null or .digest=="")' <<< "$asset"
+              gh api -X DELETE "repos/$REPO/releases/assets/$starter_id"
+            fi
+            curl -fsS --max-time 120 -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Content-Type: $type" \
+              --data-binary "@$name" "https://uploads.github.com/repos/$REPO/releases/$DRAFT/assets?name=$name" | \
+              jq -e --arg name "$name" --arg digest "$expected" --argjson size "$size" \
+                'if .state=="uploaded" and .name==$name and .digest==$digest and .size==$size then {id,name,size,digest} else error("unexpected upload response") end'
+          }
+          stage "$installer" "$exe_sha" 798815169 application/octet-stream
+          stage "$portable" "$zip_sha" 798815166 application/zip
