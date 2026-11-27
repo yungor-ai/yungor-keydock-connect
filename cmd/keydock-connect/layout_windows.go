@@ -35,7 +35,7 @@ type checkStage struct {
 
 var connectionStages = []checkStage{
 	{"device", "设备授权", "从服务器获取设备配置"},
-	{"codex", "Codex 配置", "写入本机 Codex 配置"},
+	{"codex", "Codex 配置", "核对本机 Codex 配置"},
 	{"model", "模型连通", "发送模型测试请求"},
 	{"proxy", "代理连通", "通过 SS 节点测试 HTTPS 请求"},
 }
@@ -141,7 +141,7 @@ func (ui *nativeWindow) build(icon *walk.Icon) error {
 					MinSize: d.Size{Width: 116, Height: 28}, OnClicked: ui.openTimeSettings},
 			}},
 			d.TextLabel{AssignTo: &ui.clockHint, NoPrefix: true, MinSize: d.Size{Width: 160}, TextColor: colors.ink},
-			d.TextLabel{Text: "若 Clash 等其他代理工具开启了 TUN（虚拟网卡），可在对应工具中关闭 TUN，再点「连接并测试」。",
+			d.TextLabel{Text: "若 Clash 等其他代理工具开启了 TUN（虚拟网卡），可在对应工具中关闭 TUN，再点「重新检查接入」。",
 				NoPrefix: true, MinSize: d.Size{Width: 160}, TextColor: colors.ink},
 			note(&ui.troubleshootingNotice),
 		},
@@ -150,10 +150,10 @@ func (ui *nativeWindow) build(icon *walk.Icon) error {
 		d.Composite{Layout: inline, Children: []d.Widget{
 			heading("连接检查"),
 			d.HSpacer{},
-			d.PushButton{AssignTo: &ui.export, Text: exportDiagnosticsLabel, UseLayoutFlags: true,
-				MinSize: d.Size{Width: 124, Height: 28}, OnClicked: ui.exportDiagnostics},
+			d.PushButton{AssignTo: &ui.accessCheck, Text: "重新检查接入", UseLayoutFlags: true,
+				ToolTipText: "使用已保存的设备授权检查接入状态", MinSize: d.Size{Width: 116, Height: 28}, OnClicked: ui.recheckAccess},
 		}},
-		note(&ui.diagnosticsNotice),
+		note(&ui.accessNotice),
 		subheading("设备接入检测"),
 		ui.checkGrid(connectionStages),
 		troubleshooting,
@@ -177,6 +177,8 @@ func (ui *nativeWindow) build(icon *walk.Icon) error {
 					ToolTipText: "在浏览器打开当前服务器的软件下载页", MinSize: d.Size{Height: 28}, OnClicked: ui.openSoftware},
 				d.PushButton{AssignTo: &ui.checkUpdates, Text: "检查更新", UseLayoutFlags: true,
 					MinSize: d.Size{Height: 28}, OnClicked: ui.checkForUpdate},
+				d.PushButton{AssignTo: &ui.export, Text: exportDiagnosticsLabel, UseLayoutFlags: true,
+					MinSize: d.Size{Height: 28}, OnClicked: ui.exportDiagnostics},
 				d.HSpacer{},
 				d.PushButton{AssignTo: &ui.restore, Text: "恢复原 Codex 配置", UseLayoutFlags: true,
 					MinSize: d.Size{Height: 28}, OnClicked: ui.restoreCodex},
@@ -275,7 +277,7 @@ func (ui *nativeWindow) renderNetworkAction() {
 
 func (ui *nativeWindow) revealFocusedControls() {
 	// ScrollView does not scroll focused children into view during keyboard navigation.
-	for _, control := range []walk.Widget{ui.server, ui.key, ui.connect, ui.proxyModes, ui.proxy, ui.export, ui.timeSettings, ui.recheck} {
+	for _, control := range []walk.Widget{ui.server, ui.key, ui.connect, ui.proxyModes, ui.proxy, ui.accessCheck, ui.timeSettings, ui.recheck} {
 		control.FocusedChanged().Attach(func() {
 			if !control.Focused() {
 				return

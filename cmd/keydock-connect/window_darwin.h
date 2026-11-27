@@ -5,7 +5,8 @@ enum {
     KD_CONNECT = 1,
     KD_PROXY,
     KD_RESTORE,
-    KD_EXPORT
+    KD_EXPORT,
+    KD_RECHECK_ACCESS
 };
 
 enum {

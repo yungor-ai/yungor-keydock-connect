@@ -192,6 +192,9 @@ func kdMacAction(action C.int, first, second *C.char) {
 				publishMacCheck(check)
 			})
 			message = "连接检查已完成，可在下方查看分项结果。"
+		case C.KD_RECHECK_ACCESS:
+			err = controller.RecheckAccess(ctx, publishMacCheck)
+			message = "设备接入检查已完成。"
 		case C.KD_PROXY:
 			enable := firstValue == "on"
 			mode := proxy.Mode(secondValue)

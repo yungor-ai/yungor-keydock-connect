@@ -375,3 +375,108 @@ func TestUnpairedV1ProfileAndApplyFailure(t *testing.T) {
 		t.Fatal("local config error hidden")
 	}
 }
+
+func TestRecheckAccessUsesSavedDeviceWithoutChangingSetup(t *testing.T) {
+	c, p := deviceTest(t)
+	if err := c.Connect(t.Context(), address, enrollmentKey, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Reopen to exercise the same saved pairing used on a fresh app launch.
+	c, err := NewController(c.home, c.stateDir, p, c.ops, diagnostics.New(c.stateDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := c.snapshot()
+	p.mode = proxy.ModeSystem
+	p.tested = ""
+	latest := assigned
+	latest.SubscriptionURL += "/new"
+	fetches := 0
+	c.ops.Fetch = func(_ context.Context, server, key string) (connect.DeviceConfig, error) {
+		fetches++
+		if server != address || key != enrollmentKey {
+			t.Fatal("recheck used the wrong saved pairing")
+		}
+		return connect.DeviceConfig{Profile: latest}, nil
+	}
+	c.ops.Protect = func([]byte) ([]byte, error) { t.Fatal("recheck rewrote the saved pairing"); return nil, nil }
+	c.ops.Apply = func(string, string, string, string, string) error { t.Fatal("recheck wrote Codex config"); return nil }
+	modelCalls := 0
+	c.ops.TestModel = func(_ context.Context, p connect.Profile) error {
+		modelCalls++
+		if p != latest {
+			t.Fatal("model probe ignored the current authorization")
+		}
+		return nil
+	}
+	var stages []string
+	err = c.RecheckAccess(t.Context(), func(v Check) { stages = append(stages, v.Stage+":"+v.Status) })
+	want := []string{"device:running", "device:ok", "codex:running", "codex:ok", "model:running", "model:ok", "proxy:running", "proxy:ok"}
+	if err != nil || !reflect.DeepEqual(stages, want) || fetches != 1 || modelCalls != 1 || p.tested != latest.SubscriptionURL {
+		t.Fatalf("recheck returned %v, stages %v, authorization requests %d, model requests %d", err, stages, fetches, modelCalls)
+	}
+	if c.snapshot() != before || p.mode != proxy.ModeSystem || p.stops != 0 || p.checks != 0 {
+		t.Fatal("recheck changed the saved pairing or running proxy")
+	}
+	select {
+	case <-c.networkChanged:
+		t.Fatal("recheck triggered Google and egress checks")
+	default:
+	}
+
+	latest.Model += "-changed"
+	modelCalls = 0
+	p.tested = ""
+	stages = nil
+	err = c.RecheckAccess(t.Context(), func(v Check) { stages = append(stages, v.Stage+":"+v.Status) })
+	want = []string{"device:running", "device:ok", "codex:running", "codex:failed", "model:skipped", "proxy:running", "proxy:ok"}
+	if err == nil || !reflect.DeepEqual(stages, want) || modelCalls != 0 || p.tested != latest.SubscriptionURL || c.snapshot() != before {
+		t.Fatalf("remote model change was not diagnosed independently: err=%v, stages=%v, model requests=%d", err, stages, modelCalls)
+	}
+}
+
+func TestRecheckAccessRequiresCurrentAuthorization(t *testing.T) {
+	c, p := deviceTest(t)
+	ctx := t.Context()
+	c.ops.TestModel = func(context.Context, connect.Profile) error {
+		t.Fatal("made an unauthorized model request")
+		return nil
+	}
+	var stages []string
+	report := func(v Check) { stages = append(stages, v.Stage+":"+v.Status) }
+	want := []string{"device:running", "device:failed", "codex:skipped", "model:skipped", "proxy:skipped"}
+	denied := errors.New("device authorization revoked")
+	fetches := 0
+	c.ops.Fetch = func(context.Context, string, string) (connect.DeviceConfig, error) {
+		fetches++
+		return connect.DeviceConfig{}, denied
+	}
+	if err := c.RecheckAccess(ctx, report); err == nil || !reflect.DeepEqual(stages, want) || fetches != 0 || p.tested != "" {
+		t.Fatalf("unpaired recheck: err=%v, stages=%v, fetches=%d", err, stages, fetches)
+	}
+
+	prior := enrollment{Profile: assigned, DeviceKey: enrollmentKey, ServerURL: address}
+	if err := c.persist(prior); err != nil {
+		t.Fatal(err)
+	}
+	stages = nil
+	if err := c.RecheckAccess(ctx, report); !errors.Is(err, denied) || !reflect.DeepEqual(stages, want) || fetches != 1 || p.tested != "" || c.snapshot() != prior {
+		t.Fatalf("revoked recheck: err=%v, stages=%v, fetches=%d", err, stages, fetches)
+	}
+}
+
+func TestConnectDoesNotReuseCredentialWithoutSavedAddress(t *testing.T) {
+	c, _ := deviceTest(t)
+	if err := c.persist(enrollment{Profile: assigned, DeviceKey: enrollmentKey}); err != nil {
+		t.Fatal(err)
+	}
+	c.ops.Fetch = func(context.Context, string, string) (connect.DeviceConfig, error) {
+		t.Fatal("attempted to reuse a credential without its server address")
+		return connect.DeviceConfig{}, nil
+	}
+	var stages []string
+	err := c.Connect(t.Context(), "", " ", func(v Check) { stages = append(stages, v.Stage+":"+v.Status) })
+	if err == nil || !reflect.DeepEqual(stages, []string{"device:running", "device:failed"}) {
+		t.Fatalf("blank credential and missing server: err=%v stages=%v", err, stages)
+	}
+}

@@ -176,10 +176,22 @@ func writePrivate(path string, data []byte) error {
 
 var errBusy = errors.New("接入助手正在处理其他操作，请稍后重试")
 
+type accessSetup struct{ serverURL, deviceKey string }
+
 // Connect saves the device-scoped reply, applies it, and checks actual model and
 // proxy traffic. Each step is reported independently; a failed model test does
 // not suppress the SS test. Only SetProxyMode enables a sustained proxy.
 func (c *Controller) Connect(ctx context.Context, serverURL, deviceKey string, report func(Check)) error {
+	return c.checkAccess(ctx, &accessSetup{serverURL, deviceKey}, report)
+}
+
+// RecheckAccess verifies the saved device authorization and its current assignment.
+// Only Connect applies the assignment to the local device and Codex.
+func (c *Controller) RecheckAccess(ctx context.Context, report func(Check)) error {
+	return c.checkAccess(ctx, nil, report)
+}
+
+func (c *Controller) checkAccess(ctx context.Context, setup *accessSetup, report func(Check)) error {
 	if !c.operation.TryLock() {
 		return errBusy
 	}
@@ -205,20 +217,30 @@ func (c *Controller) Connect(ctx context.Context, serverURL, deviceKey string, r
 			report(result)
 		}
 	}
-	serverURL = strings.TrimRight(strings.TrimSpace(serverURL), "/")
-	deviceKey = strings.TrimSpace(deviceKey)
 	prev := c.snapshot()
 	check("device", "running", "正在向 KeyDock 获取设备配置…", nil)
 	stepError := func(stage string, err error) error {
 		check(stage, "failed", err.Error(), err)
+		if stage == "device" && setup == nil {
+			for _, dependent := range []string{"codex", "model", "proxy"} {
+				check(dependent, "skipped", "设备授权未通过，已跳过", nil)
+			}
+		}
 		return err
 	}
-	if deviceKey == "" {
-		// Never send a cached device credential to a different origin or base path.
-		if serverURL == "" || serverURL != prev.ServerURL || prev.DeviceKey == "" {
+	serverURL, deviceKey := prev.ServerURL, prev.DeviceKey
+	if setup != nil {
+		serverURL = strings.TrimRight(strings.TrimSpace(setup.serverURL), "/")
+		deviceKey = strings.TrimSpace(setup.deviceKey)
+		if deviceKey == "" && serverURL != "" && serverURL == prev.ServerURL {
+			// A saved credential is valid only for its original origin and base path.
+			deviceKey = prev.DeviceKey
+		}
+		if deviceKey == "" {
 			return stepError("device", errors.New("请输入该服务地址对应的设备接入密钥"))
 		}
-		deviceKey = prev.DeviceKey
+	} else if serverURL == "" || deviceKey == "" {
+		return stepError("device", errors.New("请先完成设备接入，再重新检查接入"))
 	}
 	device, err := c.ops.Fetch(ctx, serverURL, deviceKey)
 	if err != nil {
@@ -229,32 +251,27 @@ func (c *Controller) Connect(ctx context.Context, serverURL, deviceKey string, r
 	}
 	p := device.Profile
 	clockSkew = device.ClockSkew
-	// An active worker using another subscription must not outlive the device switch.
-	switched := c.proxy.ActiveMode() != "" && prev.SubscriptionURL != p.SubscriptionURL
-	if switched {
-		if err = c.proxy.Stop(); err != nil {
-			return stepError("device", err)
-		}
-	}
-	next := enrollment{Profile: p, ServerURL: serverURL, DeviceKey: deviceKey}
-	if next.SubscriptionURL != "" && next.SubscriptionURL == prev.SubscriptionURL {
-		next.SubscriptionUpdatedAt = prev.SubscriptionUpdatedAt
-	}
-	if next != prev {
-		if err = c.persist(next); err != nil {
-			return stepError("device", err)
-		}
-	}
-	c.RecheckNetwork()
 	message := "已获取 " + p.DeviceName + " 的配置"
-	if switched {
-		message += "，原设备的代理已关闭"
+	if setup != nil {
+		next := enrollment{Profile: p, ServerURL: serverURL, DeviceKey: deviceKey}
+		switched, err := c.updateEnrollment(prev, next)
+		if err != nil {
+			return stepError("device", err)
+		}
+		if switched {
+			message += "，原设备的代理已关闭"
+		}
+		c.RecheckNetwork()
 	}
 	check("device", "ok", message, nil)
-	check("codex", "running", "正在更新 Codex 配置…", nil)
-	err = c.ops.Apply(c.home, c.stateDir, p.BaseURL, p.Model, p.Key)
+	if setup != nil {
+		check("codex", "running", "正在更新 Codex 配置…", nil)
+		err = c.ops.Apply(c.home, c.stateDir, p.BaseURL, p.Model, p.Key)
+	} else {
+		check("codex", "running", "正在核对本机 Codex 配置…", nil)
+	}
 	if err == nil && !c.ops.Matches(c.home, c.stateDir, p.BaseURL, p.Model, p.Key) {
-		err = errors.New("已执行配置写入，但当前 Codex 配置与服务端不一致")
+		err = errors.New("本机 Codex 配置与服务端不一致，请点击「连接并测试」同步")
 	}
 	var problems []error
 	if err != nil {
@@ -284,6 +301,25 @@ func (c *Controller) Connect(ctx context.Context, serverURL, deviceKey string, r
 		}
 	}
 	return errors.Join(problems...)
+}
+
+// An active worker using a different subscription must stop before the device switches.
+func (c *Controller) updateEnrollment(prev, next enrollment) (bool, error) {
+	switched := c.proxy.ActiveMode() != "" && prev.SubscriptionURL != next.SubscriptionURL
+	if switched {
+		if err := c.proxy.Stop(); err != nil {
+			return false, err
+		}
+	}
+	if next.SubscriptionURL != "" && next.SubscriptionURL == prev.SubscriptionURL {
+		next.SubscriptionUpdatedAt = prev.SubscriptionUpdatedAt
+	}
+	if next != prev {
+		if err := c.persist(next); err != nil {
+			return switched, err
+		}
+	}
+	return switched, nil
 }
 
 func proxyClockHint(skew time.Duration) string {

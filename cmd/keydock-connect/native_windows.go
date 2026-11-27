@@ -33,7 +33,7 @@ type nativeWindow struct {
 	proxyHint, tunHint            *walk.TextLabel
 	subscriptionHint              *walk.TextLabel
 	proxyNotice                   *walk.TextLabel
-	diagnosticsNotice             *walk.TextLabel
+	accessNotice                  *walk.TextLabel
 	clockHint                     *walk.TextLabel
 	troubleshootingNotice         *walk.TextLabel
 	troubleshooting               *walk.Composite
@@ -44,6 +44,7 @@ type nativeWindow struct {
 	colors                        windowColors
 	connect, proxy, restore       *walk.PushButton
 	export, recheck, timeSettings *walk.PushButton
+	accessCheck                   *walk.PushButton
 	downloads, checkUpdates       *walk.PushButton
 	state                         desktop.State
 	cleaned                       bool
@@ -116,7 +117,7 @@ func runWindow(dir string, controller *desktop.Controller) error {
 	ui.updateConnectionGuidance()
 	ui.server.TextChanged().Attach(ui.updateConnectionGuidance)
 	ui.key.TextChanged().Attach(ui.updateConnectionGuidance)
-	ui.renderChecks()
+	ui.resetAccessChecks()
 	ui.window.Show() // Starts the form exactly once, after all handlers are ready.
 	ui.fitWindowToMonitor()
 	enteredLoop = true
@@ -289,6 +290,7 @@ func (ui *nativeWindow) enable() {
 	ui.server.SetEnabled(idle)
 	ui.key.SetEnabled(idle)
 	ui.connect.SetEnabled(idle)
+	ui.accessCheck.SetEnabled(idle && ui.state.Paired)
 	ui.restore.SetEnabled(idle && ui.state.Restorable)
 	ui.export.SetEnabled(idle)
 	ui.timeSettings.SetEnabled(idle)
@@ -336,16 +338,41 @@ func (ui *nativeWindow) exportDiagnostics() {
 	ui.choosingExportPath = false
 	if !accepted {
 		if win.CommDlgExtendedError() != 0 {
-			ui.setNotice(ui.diagnosticsNotice, "无法打开诊断日志保存窗口", ui.colors.danger)
+			ui.setMessage("无法打开诊断日志保存窗口", ui.colors.danger)
 		}
 		return
 	}
 	path := windows.UTF16ToString(filename[:])
-	ui.runAction(ui.diagnosticsNotice, "正在保存诊断日志…", "诊断日志已保存，可发送给管理员。", func(context.Context) error {
+	ui.runAction(ui.message, "正在保存诊断日志…", "诊断日志已保存，可发送给管理员。", func(context.Context) error {
 		if err := ui.controller.ExportDiagnostics(path); err != nil {
 			return errors.New("无法保存诊断日志，请选择可写入的位置后重试")
 		}
 		return nil
+	})
+}
+
+func (ui *nativeWindow) resetAccessChecks() {
+	for _, stage := range connectionStages {
+		delete(ui.results, stage.id)
+	}
+	ui.setNotice(ui.accessNotice, "", ui.colors.muted)
+	ui.renderChecks()
+}
+
+func (ui *nativeWindow) reportAccessCheck(result desktop.Check) {
+	ui.app.Synchronize(func() {
+		ui.results[result.Stage] = result
+		ui.renderChecks()
+	})
+}
+
+func (ui *nativeWindow) recheckAccess() {
+	if !ui.state.Paired || ui.cancel != nil || ui.quitting || ui.choosingExportPath || ui.confirmingAction {
+		return
+	}
+	ui.resetAccessChecks()
+	ui.runAction(ui.accessNotice, "正在检查设备接入…", "设备接入检查已完成。", func(ctx context.Context) error {
+		return ui.controller.RecheckAccess(ctx, ui.reportAccessCheck)
 	})
 }
 
@@ -355,14 +382,9 @@ func (ui *nativeWindow) startConnect() {
 	}
 	server, key := strings.TrimSpace(ui.server.Text()), ui.key.Text()
 	ui.key.SetText("")
-	for _, stage := range connectionStages {
-		delete(ui.results, stage.id)
-	}
-	ui.renderChecks()
+	ui.resetAccessChecks()
 	ui.runTask(ui.connectionNotice, "正在连接并测试…", func(ctx context.Context) error {
-		return ui.controller.Connect(ctx, server, key, func(result desktop.Check) {
-			ui.app.Synchronize(func() { ui.results[result.Stage] = result; ui.renderChecks() })
-		})
+		return ui.controller.Connect(ctx, server, key, ui.reportAccessCheck)
 	}, func(err error) {
 		switch {
 		case err == nil:

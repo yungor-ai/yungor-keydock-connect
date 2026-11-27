@@ -70,7 +70,7 @@ func main() {
 		http.Error(w, "fixture does not serve update binaries", http.StatusNotFound)
 	})
 	mux.HandleFunc("POST /api/connect/v1/device", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer fixture-device-key" {
+		if _, err := os.Stat(filepath.Join(dir, "device-revoked")); err == nil || r.Header.Get("Authorization") != "Bearer fixture-device-key" {
 			http.Error(w, "denied", 401)
 			return
 		}

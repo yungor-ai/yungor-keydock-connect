@@ -20,7 +20,7 @@ static NSString *const reopenNotification = @"ai.yungor.keydock-connect.reopen";
 @property NSTextField *proxyStatus;
 @property NSTextField *proxyUpdated;
 @property NSTextField *proxyNotice;
-@property NSTextField *diagnosticsNotice;
+@property NSTextField *accessNotice;
 @property NSTextField *toolsNotice;
 @property NSTextField *operationNotice;
 @property NSTextField *hint;
@@ -30,6 +30,7 @@ static NSString *const reopenNotification = @"ai.yungor.keydock-connect.reopen";
 @property NSButton *connectButton;
 @property NSButton *softwareButton;
 @property NSButton *updateButton;
+@property NSButton *accessCheckButton;
 @property NSButton *networkCheckButton;
 @property NSPopUpButton *proxyModePicker;
 @property NSButton *proxyButton;
@@ -168,7 +169,7 @@ static void showRow(NSView *view, BOOL show) {
 }
 
 static NSArray<NSString *> *checkDescriptions(void) {
-    return @[@"从服务器获取设备配置", @"写入本机 Codex 配置", @"发送模型测试请求",
+    return @[@"从服务器获取设备配置", @"核对本机 Codex 配置", @"发送模型测试请求",
              @"测试设备分配的 SS 节点", @"检测 www.google.com", @"比较当前出口与 KeyDock IPv4"];
 }
 
@@ -306,9 +307,10 @@ static NSGridView *checkGrid(NSArray<NSArray<NSView *> *> *checks, NSUInteger st
     connection.cornerRadius = 10;
     showRow(self.connectionNotice, NO);
 
-    self.exportButton = [self button:@"导出诊断日志" action:@selector(exportLog:)];
-    self.exportButton.toolTip = @"保存连接诊断结果，便于交给管理员排查";
-    NSStackView *checkHeader = stack(@[heading(@"连接检查"), [NSView new], self.exportButton],
+    self.accessCheckButton = [self button:@"重新检查接入" action:@selector(recheckAccess:)];
+    self.accessCheckButton.toolTip = @"使用已保存的设备授权检查 Codex 配置、模型和代理节点";
+    self.accessCheckButton.accessibilityIdentifier = @"keydock.recheck-access";
+    NSStackView *checkHeader = stack(@[heading(@"连接检查"), [NSView new], self.accessCheckButton],
                                      NSUserInterfaceLayoutOrientationHorizontal, 8);
     NSMutableArray<NSArray<NSView *> *> *results = [NSMutableArray new];
     NSMutableArray<NSTextField *> *statuses = [NSMutableArray new];
@@ -341,13 +343,13 @@ static NSGridView *checkGrid(NSArray<NSArray<NSView *> *> *checks, NSUInteger st
                                       NSUserInterfaceLayoutOrientationHorizontal, 8);
     KDSurface *divider = surface(nil, badge, NSEdgeInsetsMake(0, 0, 0, 0));
     [divider.heightAnchor constraintEqualToConstant:1].active = YES;
-    self.diagnosticsNotice = wrappedLabel(@"", 13, secondary);
-    self.diagnosticsNotice.accessibilityIdentifier = @"keydock.diagnostics-notice";
-    KDSurface *checkCard = surface(rows(@[checkHeader, self.diagnosticsNotice, accessHeading, checkGrid(results, KD_CHECK_DEVICE, KD_CHECK_GOOGLE),
+    self.accessNotice = wrappedLabel(@"", 13, secondary);
+    self.accessNotice.accessibilityIdentifier = @"keydock.access-notice";
+    KDSurface *checkCard = surface(rows(@[checkHeader, self.accessNotice, accessHeading, checkGrid(results, KD_CHECK_DEVICE, KD_CHECK_GOOGLE),
                                          troubleshooting, divider, networkHeader, checkGrid(results, KD_CHECK_GOOGLE, stages.count)], 7),
                                   card, sectionInsets);
     checkCard.cornerRadius = 10;
-    showRow(self.diagnosticsNotice, NO);
+    showRow(self.accessNotice, NO);
     showRow(troubleshooting, NO);
 
     self.proxyTitle = label(@"未启用", 13, NSFontWeightSemibold, secondary);
@@ -389,6 +391,9 @@ static NSGridView *checkGrid(NSArray<NSArray<NSView *> *> *checks, NSUInteger st
         [document.widthAnchor constraintEqualToAnchor:scroll.contentView.widthAnchor]
     ]];
 
+    self.exportButton = [self button:@"导出诊断日志" action:@selector(exportLog:)];
+    self.exportButton.toolTip = @"保存连接诊断结果，便于交给管理员排查";
+    self.exportButton.accessibilityIdentifier = @"keydock.export-diagnostics";
     self.toolsNotice = wrappedLabel(@"", 13, secondary);
     self.toolsNotice.maximumNumberOfLines = 3;
     self.toolsNotice.lineBreakMode = NSLineBreakByTruncatingTail;
@@ -403,7 +408,7 @@ static NSGridView *checkGrid(NSArray<NSArray<NSView *> *> *checks, NSUInteger st
     quit.target = NSApp;
     NSTextField *menuBarHint = label(@"关闭窗口后可从菜单栏打开", 12, NSFontWeightRegular, secondary);
     singleLine(menuBarHint);
-    NSStackView *tools = stack(@[self.softwareButton, self.updateButton, [NSView new], menuBarHint, more],
+    NSStackView *tools = stack(@[self.softwareButton, self.updateButton, self.exportButton, [NSView new], menuBarHint, more],
                                NSUserInterfaceLayoutOrientationHorizontal, 8);
     KDSurface *footer = surface(rows(@[self.toolsNotice, tools], 5), card, NSEdgeInsetsMake(7, 20, 7, 16));
     showRow(self.toolsNotice, NO);
@@ -476,6 +481,7 @@ static NSGridView *checkGrid(NSArray<NSArray<NSView *> *> *checks, NSUInteger st
     self.connectButton.enabled = idle;
     self.softwareButton.enabled = idle;
     self.updateButton.enabled = idle;
+    self.accessCheckButton.enabled = idle && self.paired;
     self.networkCheckButton.enabled = !self.networkChecking && !self.quitting;
     self.server.enabled = idle;
     self.deviceKey.enabled = idle;
@@ -567,13 +573,18 @@ static NSGridView *checkGrid(NSArray<NSArray<NSView *> *> *checks, NSUInteger st
     }
 }
 
+- (void)resetAccessChecks {
+    [self resetChecksFrom:KD_CHECK_DEVICE through:KD_CHECK_PROXY];
+    [self showTroubleshooting:@""];
+    [self showNotice:@"" failure:NO inField:self.accessNotice];
+}
+
 - (void)connect:(id)sender {
     if (self.busy || self.quitting) return;
     [self.window makeFirstResponder:nil];
     NSString *key = self.deviceKey.stringValue;
     self.deviceKey.stringValue = @"";
-    [self resetChecksFrom:KD_CHECK_DEVICE through:KD_CHECK_PROXY];
-    [self showTroubleshooting:@""];
+    [self resetAccessChecks];
     [self runAction:KD_CONNECT first:self.server.stringValue second:key
            progress:@"正在接入设备并测试连接…" inField:self.connectionNotice];
 }
@@ -599,6 +610,12 @@ static NSGridView *checkGrid(NSArray<NSArray<NSView *> *> *checks, NSUInteger st
     [self updateButtons];
     [self showNotice:@"正在检查更新…" failure:NO inField:self.toolsNotice];
     kdMacCheckUpdate((char *)self.server.stringValue.UTF8String);
+}
+
+- (void)recheckAccess:(id)sender {
+    if (self.busy || self.quitting || !self.paired) return;
+    [self resetAccessChecks];
+    [self runAction:KD_RECHECK_ACCESS first:nil second:nil progress:@"正在检查设备接入…" inField:self.accessNotice];
 }
 
 - (void)recheckNetwork:(id)sender {
@@ -643,7 +660,7 @@ static NSGridView *checkGrid(NSArray<NSArray<NSView *> *> *checks, NSUInteger st
     panel.canCreateDirectories = YES;
     [panel beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse result) {
         if (result == NSModalResponseOK) {
-            [self runAction:KD_EXPORT first:panel.URL.path second:nil progress:@"正在导出诊断日志…" inField:self.diagnosticsNotice];
+            [self runAction:KD_EXPORT first:panel.URL.path second:nil progress:@"正在导出诊断日志…" inField:self.toolsNotice];
         }
     }];
 }

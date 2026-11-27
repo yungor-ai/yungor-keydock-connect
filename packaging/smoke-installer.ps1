@@ -222,6 +222,11 @@ try {
     if ([KeyDockWindowProbe]::Child($handle,'any-button','打开 Codex') -ne [IntPtr]::Zero) {
         throw 'The native window still contains the Open Codex button.'
     }
+    if ([KeyDockWindowProbe]::Child($handle,'any-button','重新检查接入') -eq [IntPtr]::Zero -or
+        [KeyDockWindowProbe]::Child($handle,'button','重新检查接入') -ne [IntPtr]::Zero) {
+        throw 'Access recheck must be present but disabled before enrollment.'
+    }
+    [KeyDockWindowProbe]::AssertControlInViewport($handle,[KeyDockWindowProbe]::Child($handle,'button','导出诊断日志'),'底部导出诊断日志')
     [KeyDockWindowProbe]::Capture($handle,(Join-Path $shots '01-first-launch.png'),'设备接入')
     [KeyDockWindowProbe]::AssertControlInViewport($handle,$serverField,'服务器地址')
     [KeyDockWindowProbe]::AssertControlInViewport($handle,$keyField,'设备密钥')
@@ -292,13 +297,46 @@ try {
     [KeyDockWindowProbe]::Capture($handle,(Join-Path $shots '03-without-subscription.png'),'设备接入')
     [KeyDockWindowProbe]::AssertAlignedChecks($handle)
 
+    # The new action checks the paired device even with unsaved form edits.
+    $configBeforeRecheck = (Get-FileHash $config).Hash
+    $deviceFile = Join-Path $state 'device.bin'
+    $enrollmentBeforeRecheck = (Get-FileHash $deviceFile).Hash
+    $pendingServer = "$origin/not-applied"
+    [KeyDockWindowProbe]::Enter($serverField,$pendingServer)
+    [KeyDockWindowProbe]::Click([KeyDockWindowProbe]::Child($handle,'button','重新检查接入'))
+    $null = Wait-For 'independent access recheck using the saved device' {
+        [KeyDockWindowProbe]::Child($handle,'label','设备接入检查已完成。') -ne [IntPtr]::Zero -and
+        [KeyDockWindowProbe]::CheckStatus($handle,'设备授权','完成','演示工作站') -and
+        [KeyDockWindowProbe]::CheckStatus($handle,'Codex 配置','完成','synthetic-model') -and
+        [KeyDockWindowProbe]::CheckStatus($handle,'模型连通','完成',$null) -and
+        [KeyDockWindowProbe]::CheckStatus($handle,'代理连通','跳过',$null)
+    }
+    if ([KeyDockWindowProbe]::Text($serverField) -ne $pendingServer -or
+        (Get-FileHash $config).Hash -ne $configBeforeRecheck -or (Get-FileHash $deviceFile).Hash -ne $enrollmentBeforeRecheck) {
+        throw 'Access recheck changed the form, Codex configuration, or saved enrollment.'
+    }
+    $revoked = New-Item -ItemType File -Path (Join-Path $testRoot 'device-revoked')
+    try {
+        [KeyDockWindowProbe]::Click([KeyDockWindowProbe]::Child($handle,'button','重新检查接入'))
+        $null = Wait-For 'revoked access clears previous downstream results and enables retry' {
+            [KeyDockWindowProbe]::Child($handle,'button','重新检查接入') -ne [IntPtr]::Zero -and
+            [KeyDockWindowProbe]::CheckStatus($handle,'设备授权','失败','401') -and
+            [KeyDockWindowProbe]::CheckStatus($handle,'Codex 配置','跳过','设备授权未通过') -and
+            [KeyDockWindowProbe]::CheckStatus($handle,'模型连通','跳过','设备授权未通过') -and
+            [KeyDockWindowProbe]::CheckStatus($handle,'代理连通','跳过','设备授权未通过')
+        }
+    } finally {
+        Remove-Item -LiteralPath $revoked.FullName
+        [KeyDockWindowProbe]::Enter($serverField,$origin)
+    }
+
     # Give the same paired device a loopback SS2022 node. Resync with the
     # saved Device Key and simulate clock drift without changing Windows time.
     $null = New-Item -ItemType File -Path (Join-Path $testRoot 'subscription-enabled')
     $skewMarker = Join-Path $testRoot 'proxy-clock-skew-failure'
     $null = New-Item -ItemType File -Path $skewMarker
     $clockHint = '检测到本机时钟比 KeyDock 服务端慢了 30 秒以上。请在 Windows 时间设置中点「立即同步」，再复测。'
-    $tunHint = '若 Clash 等其他代理工具开启了 TUN（虚拟网卡），可在对应工具中关闭 TUN，再点「连接并测试」。'
+    $tunHint = '若 Clash 等其他代理工具开启了 TUN（虚拟网卡），可在对应工具中关闭 TUN，再点「重新检查接入」。'
     try {
         [KeyDockWindowProbe]::Click($startButton)
         $null = Wait-For 'visible clock and TUN guidance after a proxy failure' {
