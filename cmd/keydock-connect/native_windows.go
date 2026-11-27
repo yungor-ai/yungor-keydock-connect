@@ -22,27 +22,34 @@ import (
 const exportDiagnosticsLabel = "导出诊断日志"
 
 type nativeWindow struct {
-	app                        *walk.Application
-	controller                 *desktop.Controller
-	window                     *walk.MainWindow
-	server, key                *walk.LineEdit
-	device, message, proxyHint *walk.TextLabel
-	clockHint                  *walk.TextLabel
-	troubleshooting            *walk.Composite
-	proxyState, proxyUpdatedAt *walk.Label
-	proxyModes                 *walk.ComboBox
-	rows                       []checkRow
-	colors                     windowColors
-	connect, proxy, restore    *walk.PushButton
-	export, timeSettings       *walk.PushButton
-	downloads, checkUpdates    *walk.PushButton
-	state                      desktop.State
-	cleaned                    bool
-	results                    map[string]desktop.Check
-	cancel                     context.CancelFunc
-	quitting                   bool
-	choosingExportPath         bool
-	confirmingUpdate           bool
+	app                           *walk.Application
+	controller                    *desktop.Controller
+	window                        *walk.MainWindow
+	scroll                        *walk.ScrollView
+	server, key                   *walk.LineEdit
+	device, message               *walk.TextLabel
+	connectionNotice              *walk.TextLabel
+	proxyHint, tunHint            *walk.TextLabel
+	subscriptionHint              *walk.TextLabel
+	proxyNotice                   *walk.TextLabel
+	diagnosticsNotice             *walk.TextLabel
+	clockHint                     *walk.TextLabel
+	troubleshootingNotice         *walk.TextLabel
+	troubleshooting               *walk.Composite
+	proxyState, proxyUpdatedAt    *walk.Label
+	proxyModes                    *walk.ComboBox
+	rows                          []*checkRow
+	colors                        windowColors
+	connect, proxy, restore       *walk.PushButton
+	export, recheck, timeSettings *walk.PushButton
+	downloads, checkUpdates       *walk.PushButton
+	state                         desktop.State
+	cleaned                       bool
+	results                       map[string]desktop.Check
+	cancel                        context.CancelFunc
+	quitting                      bool
+	choosingExportPath            bool
+	confirmingAction              bool
 }
 
 func runWindow(dir string, controller *desktop.Controller) error {
@@ -59,7 +66,10 @@ func runWindow(dir string, controller *desktop.Controller) error {
 	if err := ui.build(icon); err != nil {
 		return err
 	}
-	ui.proxyModes.CurrentIndexChanged().Attach(ui.renderProxy)
+	ui.proxyModes.CurrentIndexChanged().Attach(func() {
+		ui.setNotice(ui.proxyNotice, "", ui.colors.muted)
+		ui.renderProxy()
+	})
 	// The Walk layout worker closes its quit channel when App.Exit cancels
 	// the app context. A form may only be disposed while that worker is alive.
 	enteredLoop := false
@@ -81,8 +91,9 @@ func runWindow(dir string, controller *desktop.Controller) error {
 	}
 	if tray != nil {
 		defer tray.Dispose()
+		ui.setMessage("关闭窗口后可从系统托盘重新打开。", ui.colors.muted)
 	} else {
-		ui.setMessage("系统托盘暂不可用，关闭窗口将退出接入助手。", ui.colors.muted)
+		ui.setMessage("关闭窗口将退出接入助手。", ui.colors.muted)
 	}
 	cleanup, err := watchActivation(dir, func() { app.Synchronize(ui.show) })
 	if err != nil {
@@ -100,7 +111,11 @@ func runWindow(dir string, controller *desktop.Controller) error {
 	})
 	ui.refresh()
 	ui.server.SetText(ui.state.ServerURL)
+	ui.updateConnectionGuidance()
+	ui.server.TextChanged().Attach(ui.updateConnectionGuidance)
+	ui.key.TextChanged().Attach(ui.updateConnectionGuidance)
 	ui.renderChecks()
+	ui.fitWindowToMonitor()
 	ui.window.Show() // Starts the form exactly once, after all handlers are ready.
 	enteredLoop = true
 	lifetime, stopBackground := context.WithCancel(context.Background())
@@ -121,6 +136,12 @@ func runWindow(dir string, controller *desktop.Controller) error {
 		app.Synchronize(func() {
 			if lifetime.Err() == nil && !ui.quitting {
 				ui.results[result.Stage] = result
+				if ui.cancel == nil && ui.state.ProxyMode != controller.ActiveProxyMode() {
+					ui.refresh()
+					if ui.state.ProxyMode == "" {
+						ui.setNotice(ui.proxyNotice, "代理已停止。可重新启用或导出诊断日志。", ui.colors.danger)
+					}
+				}
 				ui.renderChecks()
 			}
 		})
@@ -200,8 +221,21 @@ func (ui *nativeWindow) createTray(icon *walk.Icon, register func() (*walk.Notif
 	return tray
 }
 
+func (ui *nativeWindow) fitWindowToMonitor() {
+	workArea := ui.window.Monitor().WorkArea()
+	if workArea.Width <= 0 || workArea.Height <= 0 {
+		return
+	}
+	bounds := ui.window.BoundsPixels()
+	bounds.Width = min(bounds.Width, workArea.Width)
+	bounds.Height = min(bounds.Height, workArea.Height)
+	bounds.X = workArea.X + (workArea.Width-bounds.Width)/2
+	bounds.Y = workArea.Y + (workArea.Height-bounds.Height)/2
+	ui.window.SetBoundsPixels(bounds)
+}
+
 func (ui *nativeWindow) show() {
-	if ui.quitting || ui.choosingExportPath || ui.confirmingUpdate {
+	if ui.quitting || ui.choosingExportPath || ui.confirmingAction {
 		return
 	}
 	if ui.cancel == nil {
@@ -221,15 +255,28 @@ func (ui *nativeWindow) show() {
 
 func (ui *nativeWindow) refresh() {
 	ui.state = ui.controller.State()
-	if ui.state.Paired {
-		ui.key.SetCueBanner("使用原服务器时可留空")
+	device := "尚未接入设备"
+	switch {
+	case ui.state.Device != "" && ui.state.Model != "":
+		device = ui.state.Device + " · " + ui.state.Model
+	case ui.state.Device != "":
+		device = ui.state.Device
+	case ui.state.Paired:
+		device = "已接入设备"
 	}
-	if ui.state.Device != "" {
-		ui.device.SetText(ui.state.Device + " · " + ui.state.Model)
-	} else {
-		ui.device.SetText("输入管理员提供的服务器地址和设备密钥。")
-	}
+	ui.device.SetText(device)
 	ui.enable()
+}
+
+func (ui *nativeWindow) updateConnectionGuidance() {
+	sameServer := ui.state.Paired && strings.TrimRight(strings.TrimSpace(ui.server.Text()), "/") == ui.state.ServerURL
+	if sameServer {
+		ui.key.SetCueBanner("可留空，使用已保存密钥")
+		ui.setNotice(ui.connectionNotice, "已保存设备密钥，可留空后直接连接并测试。", ui.colors.muted)
+		return
+	}
+	ui.key.SetCueBanner("管理员签发的 Device Key")
+	ui.setNotice(ui.connectionNotice, "请填写管理员提供的服务器地址和设备密钥。", ui.colors.muted)
 }
 
 func (ui *nativeWindow) enable() {
@@ -243,16 +290,17 @@ func (ui *nativeWindow) enable() {
 	ui.downloads.SetEnabled(idle)
 	ui.checkUpdates.SetEnabled(idle)
 	ui.renderProxy()
+	ui.renderNetworkAction()
 }
 
 func (ui *nativeWindow) openTimeSettings() {
 	if windows.GetCurrentProcessToken().IsElevated() {
-		ui.setMessage("请从 Windows 开始菜单打开设置，进入「时间和语言」→「日期和时间」。", ui.colors.accent)
+		ui.setNotice(ui.troubleshootingNotice, "请从 Windows 开始菜单打开设置，进入「时间和语言」→「日期和时间」。", ui.colors.accent)
 		return
 	}
 	settings := windows.StringToUTF16Ptr("ms-settings:dateandtime")
 	if err := windows.ShellExecute(windows.Handle(ui.window.Handle()), nil, settings, nil, nil, win.SW_SHOWNORMAL); err != nil {
-		ui.setMessage("无法打开时间设置。请从 Windows 设置中进入「时间和语言」→「日期和时间」。", ui.colors.danger)
+		ui.setNotice(ui.troubleshootingNotice, "无法打开时间设置。请从 Windows 设置中进入「时间和语言」→「日期和时间」。", ui.colors.danger)
 	}
 }
 
@@ -283,12 +331,12 @@ func (ui *nativeWindow) exportDiagnostics() {
 	ui.choosingExportPath = false
 	if !accepted {
 		if win.CommDlgExtendedError() != 0 {
-			ui.setMessage("无法打开诊断日志保存窗口", ui.colors.danger)
+			ui.setNotice(ui.diagnosticsNotice, "无法打开诊断日志保存窗口", ui.colors.danger)
 		}
 		return
 	}
 	path := windows.UTF16ToString(filename[:])
-	ui.runAction("正在保存诊断日志…", "诊断日志已保存，可发送给管理员。", func(context.Context) error {
+	ui.runAction(ui.diagnosticsNotice, "正在保存诊断日志…", "诊断日志已保存，可发送给管理员。", func(context.Context) error {
 		if err := ui.controller.ExportDiagnostics(path); err != nil {
 			return errors.New("无法保存诊断日志，请选择可写入的位置后重试")
 		}
@@ -297,43 +345,90 @@ func (ui *nativeWindow) exportDiagnostics() {
 }
 
 func (ui *nativeWindow) startConnect() {
+	if ui.cancel != nil || ui.quitting {
+		return
+	}
 	server, key := strings.TrimSpace(ui.server.Text()), ui.key.Text()
 	ui.key.SetText("")
 	for _, stage := range connectionStages {
 		delete(ui.results, stage.id)
 	}
 	ui.renderChecks()
-	ui.runAction("正在检查连接…", "连接检查已完成", func(ctx context.Context) error {
+	ui.runTask(ui.connectionNotice, "正在连接并测试…", func(ctx context.Context) error {
 		return ui.controller.Connect(ctx, server, key, func(result desktop.Check) {
 			ui.app.Synchronize(func() { ui.results[result.Stage] = result; ui.renderChecks() })
 		})
-	})
-}
-
-func (ui *nativeWindow) runAction(progress, done string, action func(context.Context) error) {
-	ui.runTask(progress, action, func(err error) {
-		if err != nil {
-			ui.setMessage(err.Error(), ui.colors.danger)
-		} else {
-			ui.setMessage(done, ui.colors.success)
+	}, func(err error) {
+		switch {
+		case err == nil:
+			ui.updateConnectionGuidance()
+			ui.setNotice(ui.connectionNotice, "设备接入完成。可查看下方的连接检查。", ui.colors.success)
+		case ui.results["device"].Status == "failed":
+			message := ui.results["device"].Message
+			if strings.Contains(message, "服务拒绝了当前密钥") {
+				message += "。请核对服务器地址，并重新填写该设备的密钥。"
+			}
+			ui.setNotice(ui.connectionNotice, message, ui.colors.danger)
+		case ui.results["device"].Status == "ok":
+			ui.updateConnectionGuidance()
+			ui.setNotice(ui.connectionNotice, "设备已接入，部分检测未通过。请查看下方的连接检查。", ui.colors.danger)
+		default:
+			ui.setNotice(ui.connectionNotice, err.Error(), ui.colors.danger)
 		}
 	})
 }
 
-func (ui *nativeWindow) runTask(progress string, action func(context.Context) error, completed func(error)) {
-	if ui.cancel != nil || ui.quitting || ui.choosingExportPath || ui.confirmingUpdate {
+func (ui *nativeWindow) restoreCodex() {
+	const title = "恢复原 Codex 配置"
+	const message = "这会撤销接入助手为 Codex 写入的 KeyDock 配置。需要再次使用时，请点击「连接并测试」。"
+	ui.confirmingAction = true
+	choice := walk.MsgBox(ui.window, title, message, walk.MsgBoxOKCancel|walk.MsgBoxIconWarning|walk.MsgBoxDefButton2)
+	ui.confirmingAction = false
+	if choice != win.IDOK {
+		return
+	}
+	ui.runTask(ui.message, "正在恢复 Codex 配置…", func(context.Context) error {
+		return ui.controller.Restore()
+	}, func(err error) {
+		if err != nil {
+			ui.setMessage(err.Error(), ui.colors.danger)
+			return
+		}
+		delete(ui.results, "codex")
+		delete(ui.results, "model")
+		ui.renderChecks()
+		ui.setNotice(ui.connectionNotice, "已恢复原 Codex 配置，再次使用时请连接并测试。", ui.colors.muted)
+		ui.setMessage("已恢复原 Codex 配置", ui.colors.success)
+	})
+}
+
+func (ui *nativeWindow) runAction(notice *walk.TextLabel, progress, done string, action func(context.Context) error) {
+	ui.runTask(notice, progress, action, func(err error) {
+		if err != nil {
+			ui.setNotice(notice, err.Error(), ui.colors.danger)
+		} else {
+			ui.setNotice(notice, done, ui.colors.success)
+		}
+	})
+}
+
+func (ui *nativeWindow) runTask(notice *walk.TextLabel, progress string, action func(context.Context) error, completed func(error)) {
+	if ui.cancel != nil || ui.quitting || ui.choosingExportPath || ui.confirmingAction {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	ui.cancel = cancel
 	ui.enable()
-	ui.setMessage(progress, ui.colors.accent)
+	ui.setNotice(notice, progress, ui.colors.accent)
 	go func() {
 		err := action(ctx)
 		cancel()
 		ui.app.Synchronize(func() {
 			ui.cancel = nil
 			if ui.quitting {
+				if notice != ui.message {
+					ui.setNotice(notice, "", ui.colors.muted)
+				}
 				ui.finishQuit()
 				return
 			}
@@ -344,13 +439,32 @@ func (ui *nativeWindow) runTask(progress string, action func(context.Context) er
 }
 
 func (ui *nativeWindow) setMessage(text string, color walk.Color) {
-	ui.message.SetTextColor(color)
-	ui.message.SetText(strings.ReplaceAll(text, "\n", "　"))
-	ui.message.SetToolTipText(text)
+	ui.setNotice(ui.message, text, color)
+}
+
+func (ui *nativeWindow) setNotice(label *walk.TextLabel, text string, color walk.Color) {
+	label.SetTextColor(color)
+	label.SetText(strings.ReplaceAll(text, "\n", "　"))
+	label.SetToolTipText(text)
+	ui.setControlVisible(label, text != "")
+}
+
+func (ui *nativeWindow) setControlVisible(control walk.Widget, visible bool) {
+	handle := control.Handle()
+	// Test the control's own visibility even while the window is in the tray.
+	if (win.GetWindowLong(handle, win.GWL_STYLE)&win.WS_VISIBLE != 0) == visible {
+		return
+	}
+	command := int32(win.SW_HIDE)
+	if visible {
+		command = win.SW_SHOWNA
+	}
+	win.ShowWindow(handle, command)
+	ui.window.RequestLayout()
 }
 
 func (ui *nativeWindow) quit() {
-	if ui.quitting || ui.choosingExportPath || ui.confirmingUpdate {
+	if ui.quitting || ui.choosingExportPath || ui.confirmingAction {
 		return
 	}
 	ui.quitting = true
@@ -372,6 +486,10 @@ func (ui *nativeWindow) finishQuit() {
 				ui.quitting = false
 				ui.refresh()
 				ui.show()
+				// The network watcher may have published its completion while quitting.
+				if ui.networkCheckRunning() {
+					ui.controller.RecheckNetwork()
+				}
 				ui.setMessage("退出前无法恢复系统代理："+err.Error(), ui.colors.danger)
 				return
 			}

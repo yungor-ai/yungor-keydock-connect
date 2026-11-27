@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -188,10 +189,16 @@ func kdMacAction(action C.int, first, second *C.char) {
 		controller := current.controller
 		var err error
 		var message string
+		var deviceFailure string
 		switch action {
 		case C.KD_CONNECT:
-			err = controller.Connect(ctx, firstValue, secondValue, publishMacCheck)
-			message = "连接检查已完成"
+			err = controller.Connect(ctx, firstValue, secondValue, func(check desktop.Check) {
+				if check.Stage == "device" && check.Status == "failed" {
+					deviceFailure = check.Message
+				}
+				publishMacCheck(check)
+			})
+			message = "连接检查已完成，可在下方查看分项结果。"
 		case C.KD_PROXY:
 			enable := firstValue == "on"
 			mode := proxy.Mode(secondValue)
@@ -206,7 +213,14 @@ func kdMacAction(action C.int, first, second *C.char) {
 		if err != nil {
 			message = err.Error()
 			if action == C.KD_CONNECT {
-				message = "部分检查未通过，请查看分项结果。"
+				message = "部分检查未通过，请查看下方「连接检查」。"
+				if deviceFailure != "" {
+					message = deviceFailure
+					var status interface{ HTTPStatus() int }
+					if errors.As(err, &status) && (status.HTTPStatus() == http.StatusUnauthorized || status.HTTPStatus() == http.StatusForbidden) {
+						message += "。请核对服务器地址和设备密钥后重试。"
+					}
+				}
 			}
 		}
 		publishMacState(controller.State(), false)

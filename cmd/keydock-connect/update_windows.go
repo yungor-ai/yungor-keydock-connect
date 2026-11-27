@@ -32,7 +32,7 @@ func (ui *nativeWindow) openSoftware() {
 func (ui *nativeWindow) checkForUpdate() {
 	server := ui.server.Text()
 	var release *selfupdate.Release
-	ui.runTask("正在检查更新…", func(ctx context.Context) error {
+	ui.runTask(ui.message, "正在检查更新…", func(ctx context.Context) error {
 		var err error
 		release, err = selfupdate.Check(ctx, server)
 		return err
@@ -59,8 +59,8 @@ func (ui *nativeWindow) checkForUpdate() {
 
 func (ui *nativeWindow) confirmUpdate(version string) (bool, error) {
 	ui.show()
-	ui.confirmingUpdate = true
-	defer func() { ui.confirmingUpdate = false }()
+	ui.confirmingAction = true
+	defer func() { ui.confirmingAction = false }()
 	var dialog *walk.Dialog
 	var cancel *walk.PushButton
 	err := (d.Dialog{
@@ -93,7 +93,7 @@ func (ui *nativeWindow) confirmUpdate(version string) (bool, error) {
 
 func (ui *nativeWindow) installUpdate(release *selfupdate.Release) {
 	owner := windows.Handle(ui.window.Handle())
-	ui.runTask("正在下载并校验安装包…", func(ctx context.Context) error {
+	ui.runTask(ui.message, "正在下载并校验安装包…", func(ctx context.Context) error {
 		path, err := selfupdate.Download(ctx, release)
 		if err != nil {
 			return err

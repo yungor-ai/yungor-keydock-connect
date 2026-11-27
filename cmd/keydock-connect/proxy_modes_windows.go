@@ -6,8 +6,8 @@ import (
 	"context"
 
 	"github.com/tailscale/walk"
-	"github.com/tailscale/win"
 	"github.com/yungor-ai/yungor-keydock-connect/internal/proxy"
+	"golang.org/x/sys/windows"
 )
 
 const tunModeIndex = 1
@@ -37,52 +37,68 @@ func (ui *nativeWindow) renderProxy() {
 	selected, current := ui.selectedProxyMode(), ui.state.ProxyMode
 	active := current != ""
 	idle := ui.cancel == nil && !ui.quitting
-	title, hint := "系统代理未启用", "启用后，使用系统代理的应用流量将按订阅规则分流。"
+	title := "系统代理未启用"
 	switch {
 	case current == proxy.ModeTUN:
-		title, hint = "TUN 已启用", "流量正通过虚拟网卡按订阅规则分流。"
+		title = "TUN 已启用"
 	case active:
-		title, hint = "系统代理已启用", "使用系统代理的应用流量正按订阅规则分流。"
+		title = "系统代理已启用"
 	case selected == proxy.ModeTUN:
-		title, hint = "TUN 未启用", "通过虚拟网卡按订阅规则分流，覆盖绕过系统代理的应用。"
+		title = "TUN 未启用"
 	}
 	ui.proxyState.SetText(title)
+	stateColor := ui.colors.muted
 	if active {
-		ui.proxyState.SetTextColor(ui.colors.success)
-		hint += " 每小时自动刷新订阅。"
-	} else {
-		ui.proxyState.SetTextColor(ui.colors.ink)
-		if !ui.state.Subscription {
-			unavailable := "连接设备并获取 SS 订阅后，可在此启用。"
-			if ui.state.Paired {
-				unavailable = "当前设备未分配 SS 订阅。"
-			}
-			if selected == proxy.ModeTUN {
-				hint += " " + unavailable
-			} else {
-				hint = unavailable
-			}
-		}
+		stateColor = ui.colors.success
 	}
-	if checkedAt := ui.state.SubscriptionCheckedAt; ui.state.Subscription && ui.state.SubscriptionRefreshFailed && !checkedAt.IsZero() {
-		stamp := checkedAt.Local().Format("01-02 15:04")
-		hint += " 最近刷新失败（" + stamp + "）。"
-		if active {
-			hint += "将在下一轮自动重试。"
-		}
+	ui.proxyState.SetTextColor(stateColor)
+
+	var hint string
+	switch {
+	case !active && !ui.state.Subscription && ui.state.Paired:
+		hint = "当前设备未分配 SS 订阅。"
+	case !active && !ui.state.Subscription:
+		hint = "请先接入设备并获取 SS 订阅。"
+	case current == proxy.ModeTUN && selected == current:
+		hint = "流量正通过虚拟网卡按订阅规则分流。"
+	case active && selected == current:
+		hint = "使用系统代理的应用流量正按订阅规则分流。"
+	case selected == proxy.ModeTUN:
+		hint = "通过虚拟网卡按订阅规则分流，覆盖绕过系统代理的应用。"
+	default:
+		hint = "启用后，使用系统代理的应用流量将按订阅规则分流。"
 	}
-	visibility := int32(win.SW_HIDE)
+	ui.setNotice(ui.proxyHint, hint, ui.colors.muted)
+
+	tunHelp := ""
+	if ui.state.Subscription && selected == proxy.ModeTUN && selected != current && !windows.GetCurrentProcessToken().IsElevated() {
+		tunHelp = "启用 TUN 需要管理员权限。请先退出助手，再从开始菜单用当前账号以管理员身份运行。"
+	}
+	ui.setNotice(ui.tunHint, tunHelp, ui.colors.muted)
+
+	refreshHint := ""
 	if ui.state.Subscription {
 		lastUpdate := "尚未更新"
 		if updatedAt := ui.state.SubscriptionUpdatedAt; !updatedAt.IsZero() {
 			lastUpdate = updatedAt.Local().Format("2006-01-02 15:04:05")
 		}
 		ui.proxyUpdatedAt.SetText("最近更新时间 " + lastUpdate)
-		visibility = win.SW_SHOWNA
+		if active {
+			refreshHint = "订阅每小时自动刷新。"
+		}
+		if checkedAt := ui.state.SubscriptionCheckedAt; ui.state.SubscriptionRefreshFailed && !checkedAt.IsZero() {
+			refreshHint = "订阅刷新失败（" + checkedAt.Local().Format("01-02 15:04") + "）。"
+			if active {
+				refreshHint += "将在下一轮自动重试。"
+			}
+		}
 	}
-	// Set the label's own visibility so refreshes work while hidden in the tray.
-	win.ShowWindow(ui.proxyUpdatedAt.Handle(), visibility)
-	ui.proxyHint.SetText(hint)
+	ui.setControlVisible(ui.proxyUpdatedAt, ui.state.Subscription)
+	refreshColor := ui.colors.muted
+	if ui.state.SubscriptionRefreshFailed {
+		refreshColor = ui.colors.danger
+	}
+	ui.setNotice(ui.subscriptionHint, refreshHint, refreshColor)
 	ui.proxyModes.SetEnabled(idle)
 	ui.proxy.SetText(proxyAction(selected, current))
 	ui.proxy.SetEnabled(idle && (selected == current || ui.state.Subscription))
@@ -92,18 +108,18 @@ func (ui *nativeWindow) toggleProxy() {
 	mode, current := ui.selectedProxyMode(), ui.state.ProxyMode
 	on := mode != current
 	action := proxyAction(mode, current)
-	ui.runTask("正在"+action+"…", func(context.Context) error {
+	ui.runTask(ui.proxyNotice, "正在"+action+"…", func(context.Context) error {
 		return ui.controller.SetProxyMode(on, mode)
 	}, func(err error) {
 		if err != nil {
 			if mode != proxy.ModeTUN && current != proxy.ModeTUN {
-				ui.setMessage(err.Error(), ui.colors.danger)
+				ui.setNotice(ui.proxyNotice, err.Error(), ui.colors.danger)
 				return
 			}
-			ui.setMessage("", ui.colors.muted)
+			ui.setNotice(ui.proxyNotice, "", ui.colors.muted)
 			walk.MsgBox(ui.window, "TUN 操作未完成", err.Error(), walk.MsgBoxOK|walk.MsgBoxIconWarning)
 			return
 		}
-		ui.setMessage("已"+action, ui.colors.success)
+		ui.setNotice(ui.proxyNotice, "", ui.colors.muted)
 	})
 }
