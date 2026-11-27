@@ -84,6 +84,20 @@ func TestRejectsInvalidFeedWithoutLeakingContents(t *testing.T) {
 	}
 }
 
+func TestMacMixedListenerUsesIPv4(t *testing.T) {
+	raw, err := buildModeProfile([]byte(fixture+"ipv6: true\n"), 17890, ModeLocal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg["ipv6"] != false {
+		t.Fatal("the macOS mixed listener must explicitly disable core IPv6")
+	}
+}
+
 func TestTUNProfilePreservesRoutingAndUsesTrustedRuntimeSettings(t *testing.T) {
 	source := []byte(fixture + `tun: {enable: false, device: "untrusted-device", strict-route: false, dns-hijack: ["any:53"], mtu: 9000}
 dns: {enable: true, nameserver: ["https://untrusted.invalid/dns-query"]}

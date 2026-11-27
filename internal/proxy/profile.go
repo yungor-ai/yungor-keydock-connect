@@ -278,6 +278,11 @@ func buildRoutingProfileWithTUN(body []byte, port int, diagnostic bool, mode Mod
 		TUN           *tunSettings     `yaml:"tun,omitempty"`
 		Sniffer       *snifferSettings `yaml:"sniffer,omitempty"`
 	}{Routing: cfg, Port: port, Bind: "127.0.0.1", Mode: "rule", Log: "silent"}
+	// The macOS system proxy uses the local mixed listener. Mihomo enables
+	// IPv6 by default, while the KeyDock relay has an IPv4-only uplink.
+	if mode == ModeLocal || mode == ModeTUN {
+		profile.IPv6 = new(false)
+	}
 	if mode == ModeTUN {
 		if tun == nil {
 			tun = makeTUNSettings(tunDeviceName)
@@ -287,7 +292,6 @@ func buildRoutingProfileWithTUN(body []byte, port int, diagnostic bool, mode Mod
 			// TUN is active so clients can fall back without bypassing the tunnel.
 			tun.StrictRoute = true
 		}
-		profile.IPv6 = new(false)
 		profile.TUN = tun
 		// Use HTTP Host or TLS/QUIC SNI for domain rules without replacing the
 		// resolver's destination IP, which still drives the IP rules and dial.
