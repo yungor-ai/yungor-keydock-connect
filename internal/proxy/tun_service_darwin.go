@@ -41,7 +41,7 @@ var (
 	tunRequests         = make(chan tunRequest, 1)
 	tunRequestsMu       sync.Mutex
 	tunServiceRetiring  bool
-	errDarwinTUNRestart = errors.New("KeyDock TUN 后台服务正在切换到新版，请稍后重新启用 TUN")
+	errDarwinTUNRestart = errors.New("KeyDock 网络后台服务正在切换到新版，请稍后重新启用代理")
 )
 
 //export kdTUNEnqueue
@@ -62,7 +62,7 @@ func kdTUNEnqueue(fd C.int, uid C.uid_t) C.bool {
 func requestDarwinTUNChannel() (*net.UnixConn, error) {
 	requirement := C.kdTUNCopyRequirement()
 	if requirement == nil {
-		return nil, errors.New("TUN 需要正式签名和公证的 KeyDock Connect 安装包")
+		return nil, errors.New("网络后台服务需要正式签名和公证的 KeyDock Connect 安装包")
 	}
 	defer C.free(unsafe.Pointer(requirement))
 
@@ -74,7 +74,7 @@ func requestDarwinTUNChannel() (*net.UnixConn, error) {
 	}
 	syscall.ForkLock.RUnlock()
 	if err != nil {
-		return nil, errors.New("无法创建 TUN 会话通道")
+		return nil, errors.New("无法创建网络服务会话通道")
 	}
 	peer := os.NewFile(uintptr(fds[1]), "tun-peer")
 	defer peer.Close()
@@ -84,7 +84,7 @@ func requestDarwinTUNChannel() (*net.UnixConn, error) {
 	}
 	if !bool(C.kdTUNRequest(C.int(peer.Fd()), requirement)) {
 		_ = conn.Close()
-		return nil, errors.New("无法连接 KeyDock TUN 后台服务，请稍后重试。若仍失败，请检查后台项目授权并使用当前登录的 macOS 会话")
+		return nil, errors.New("无法连接 KeyDock 网络后台服务，请稍后重试。若仍失败，请检查后台项目授权并使用当前登录的 macOS 会话")
 	}
 	return conn, nil
 }
@@ -94,27 +94,27 @@ func tunFileConn(fd int) (*net.UnixConn, error) {
 	defer file.Close()
 	kind, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_TYPE)
 	if err != nil || kind != unix.SOCK_STREAM {
-		return nil, errors.New("无效的 TUN 会话通道")
+		return nil, errors.New("无效的网络服务会话通道")
 	}
 	raw, err := net.FileConn(file)
 	if err != nil {
-		return nil, errors.New("无法打开 TUN 会话通道")
+		return nil, errors.New("无法打开网络服务会话通道")
 	}
 	conn, ok := raw.(*net.UnixConn)
 	if !ok {
 		_ = raw.Close()
-		return nil, errors.New("无效的 TUN 会话通道")
+		return nil, errors.New("无效的网络服务会话通道")
 	}
 	return conn, nil
 }
 
 func runDarwinTUNService() error {
 	if os.Geteuid() != 0 {
-		return errors.New("TUN 后台服务需要 macOS 管理员授权")
+		return errors.New("网络后台服务需要 macOS 管理员授权")
 	}
 	requirement := C.kdTUNCopyRequirement()
 	if requirement == nil {
-		return errors.New("TUN 后台服务需要正式签名的 KeyDock Connect 安装包")
+		return errors.New("网络后台服务需要正式签名的 KeyDock Connect 安装包")
 	}
 	defer C.free(unsafe.Pointer(requirement))
 	executable, err := os.Executable()
@@ -123,16 +123,21 @@ func runDarwinTUNService() error {
 	}
 	original, err := os.Stat(executable)
 	if err != nil {
-		return errors.New("无法定位 TUN 后台服务程序")
+		return errors.New("无法定位网络后台服务程序")
 	}
 	corePath := filepath.Join(filepath.Dir(executable), "..", "Resources", "core", "mihomo")
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 	listener := C.kdTUNListen(requirement)
 	if listener == nil {
-		return errors.New("无法启动 KeyDock TUN 后台服务")
+		return errors.New("无法启动 KeyDock 网络后台服务")
 	}
 	defer C.kdTUNStopListening(listener)
+	// A daemon killed mid-session may have left macOS pointing at a closed
+	// listener. Restore its root-owned preferences receipt before accepting work.
+	if err := updateDarwinSystemProxy(false); err != nil {
+		return err
+	}
 	var lease sync.Mutex
 	var workers sync.WaitGroup
 	defer workers.Wait()
@@ -144,6 +149,8 @@ func runDarwinTUNService() error {
 			return nil
 		case <-replacementCheck.C:
 			if lease.TryLock() {
+				// Retry restoration after transient settings lock / apply failures.
+				_ = updateDarwinSystemProxy(false)
 				changed := darwinTUNExecutableChanged(executable, original)
 				lease.Unlock()
 				if changed {
@@ -157,7 +164,7 @@ func runDarwinTUNService() error {
 				continue
 			}
 			if !lease.TryLock() {
-				finishDarwinTUNLease(conn, errors.New("另一个会话正在使用 KeyDock TUN，请先停用该会话的代理"))
+				finishDarwinTUNLease(conn, errors.New("另一个会话正在使用 KeyDock 网络服务，请先停用该会话的代理"))
 				_ = conn.Close()
 				continue
 			}
@@ -179,7 +186,7 @@ func runDarwinTUNService() error {
 					if darwinTUNExecutableChanged(executable, original) {
 						return errDarwinTUNRestart
 					}
-					return runDarwinTUN(ctx, corePath, body, ready)
+					return runDarwinNetworkService(ctx, corePath, body, ready)
 				})
 				// The session is free before teardown is acknowledged.
 				lease.Unlock()
@@ -187,6 +194,17 @@ func runDarwinTUNService() error {
 			}()
 		}
 	}
+}
+
+func runDarwinNetworkService(ctx context.Context, corePath string, body []byte, ready func() error) error {
+	// Clear a prior lease's retryable cleanup before another mode is admitted.
+	if err := updateDarwinSystemProxy(false); err != nil {
+		return err
+	}
+	if string(body) == darwinSystemProxyRequest {
+		return runDarwinSystemProxy(ctx, ready)
+	}
+	return runDarwinTUN(ctx, corePath, body, ready)
 }
 
 func darwinTUNExecutableChanged(path string, original os.FileInfo) bool {
@@ -234,7 +252,7 @@ func serveDarwinTUNLease(parent context.Context, conn net.Conn, run func(context
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	body, err := readTUNFrame(conn, profileLimit)
 	if err != nil || len(body) == 0 {
-		return errors.New("TUN 订阅配置无效或超出大小限制")
+		return errors.New("网络服务请求无效或超出大小限制")
 	}
 	_ = conn.SetReadDeadline(time.Time{})
 	ctx, cancel := context.WithCancel(parent)
@@ -252,7 +270,7 @@ func serveDarwinTUNLease(parent context.Context, conn net.Conn, run func(context
 		return err
 	})
 	if err == nil && !started {
-		return errors.New("TUN 在虚拟网卡就绪前停止")
+		return errors.New("网络服务在就绪前停止")
 	}
 	return err
 }
@@ -262,7 +280,7 @@ func finishDarwinTUNLease(conn net.Conn, err error) {
 	if err != nil {
 		message = []byte(err.Error())
 		if len(message) > tunReplyLimit {
-			message = []byte("TUN 后台服务报告运行失败")
+			message = []byte("网络后台服务报告运行失败")
 		}
 	}
 	_ = conn.SetWriteDeadline(time.Now().Add(3 * time.Second))

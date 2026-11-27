@@ -29,21 +29,22 @@ type localProfile struct {
 }
 
 type child struct {
-	mode     Mode
-	profile  localProfile
-	tun      *darwinTUNLease
-	lifeline *os.File
-	cmd      *exec.Cmd
-	started  chan int
-	done     chan struct{}
-	waitErr  error // Set before done closes.
-	activeAt time.Time
-	groupMu  sync.Mutex
-	reaping  bool
+	mode        Mode
+	profile     localProfile
+	tun         *darwinTUNLease
+	systemProxy *darwinTUNLease
+	lifeline    *os.File
+	cmd         *exec.Cmd
+	started     chan int
+	done        chan struct{}
+	waitErr     error // Set before done closes.
+	activeAt    time.Time
+	groupMu     sync.Mutex
+	reaping     bool
 }
 
 func (m *Manager) ProxyAddress() string {
-	if p := m.active.Load(); p != nil && p.mode == ModeLocal {
+	if p := m.active.Load(); p != nil && (p.mode == ModeLocal || p.mode == ModeSystem) {
 		return localAddress(p.profile.port)
 	}
 	return ""
@@ -54,21 +55,21 @@ func localAddress(port int) string {
 }
 
 func (m *Manager) CheckMode(mode Mode) error {
-	if mode != ModeLocal && mode != ModeTUN {
+	if mode != ModeLocal && mode != ModeSystem && mode != ModeTUN {
 		return errors.New("无效的 macOS 代理模式")
 	}
 	return nil
 }
 
-func (m *Manager) Start(raw string) error { return m.StartMode(raw, ModeLocal) }
+func (m *Manager) Start(raw string) error { return m.StartMode(raw, ModeSystem) }
 
 func (m *Manager) StartMode(raw string, mode Mode) error {
 	if err := m.CheckMode(mode); err != nil {
 		return err
 	}
 	ctx := context.Background()
-	if mode == ModeLocal {
-		return m.startLocal(ctx, raw, nil, localPort)
+	if mode != ModeTUN {
+		return m.startDarwinProxy(ctx, raw, nil, localPort, mode)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -89,13 +90,17 @@ func (m *Manager) StartMode(raw string, mode Mode) error {
 }
 
 func (m *Manager) startLocal(ctx context.Context, raw string, tlsConfig *tls.Config, port int) error {
+	return m.startDarwinProxy(ctx, raw, tlsConfig, port, ModeLocal)
+}
+
+func (m *Manager) startDarwinProxy(ctx context.Context, raw string, tlsConfig *tls.Config, port int, mode Mode) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.beforeDarwinStartLocked(); err != nil {
 		return err
 	}
 	if m.running != nil {
-		if m.running.mode != ModeLocal {
+		if m.running.mode != mode {
 			return errors.New("请先停用当前代理，再切换代理模式")
 		}
 		if err := ctx.Err(); err != nil {
@@ -122,6 +127,9 @@ func (m *Manager) startLocal(ctx context.Context, raw string, tlsConfig *tls.Con
 	if err != nil {
 		return err
 	}
+	if mode == ModeSystem {
+		return m.startSystemProfileLocked(ctx, profile)
+	}
 	return m.startLocalProfileLocked(ctx, profile)
 }
 
@@ -145,6 +153,22 @@ func (m *Manager) startLocalProfileLocked(ctx context.Context, profile localProf
 	return nil
 }
 
+// The daemon only points macOS at the fixed listener after this process has
+// verified that the bundled core owns it. Either side ending tears down both.
+func (m *Manager) startSystemProfileLocked(ctx context.Context, profile localProfile) error {
+	p, err := m.launchLocal(ctx, profile, "run")
+	if err != nil {
+		return err
+	}
+	p.systemProxy, err = openDarwinTUN(ctx, []byte(darwinSystemProxyRequest))
+	if err != nil {
+		return errors.Join(fmt.Errorf("未能启用系统代理，请稍后重试以连接最新版后台服务：%w", err), closeLocalChild(p))
+	}
+	p.mode = ModeSystem
+	m.trackDarwinChild(p)
+	return nil
+}
+
 func (m *Manager) startTUNProfileLocked(ctx context.Context, profile localProfile) (result error) {
 	started := time.Now()
 	defer func() { m.logStage("proxy.tun_ready", started, result) }()
@@ -161,7 +185,14 @@ func (m *Manager) trackDarwinChild(p *child) {
 	m.running = p
 	m.active.Store(p)
 	go func() {
-		<-p.done
+		var settingsDone <-chan struct{}
+		if p.systemProxy != nil {
+			settingsDone = p.systemProxy.done
+		}
+		select {
+		case <-p.done:
+		case <-settingsDone:
+		}
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		if m.running == p {
@@ -171,7 +202,15 @@ func (m *Manager) trackDarwinChild(p *child) {
 }
 
 func (m *Manager) noteDarwinWorkerExitLocked(p *child) {
-	waitErr := p.waitErr
+	var waitErr error
+	if p.systemProxy != nil {
+		waitErr = errors.Join(p.systemProxy.stop(), closeLocalChild(p))
+	}
+	select {
+	case <-p.done:
+		waitErr = errors.Join(waitErr, p.waitErr)
+	default:
+	}
 	if p.tun != nil {
 		waitErr = p.tun.err
 	}
@@ -432,8 +471,13 @@ func (m *Manager) stopDarwinLocked() error {
 	var err error
 	if p.tun != nil {
 		err = p.tun.stop()
-	} else if err = closeLocalChild(p); err != nil {
-		return err
+	} else {
+		if p.systemProxy != nil {
+			err = p.systemProxy.stop()
+		}
+		if closeErr := closeLocalChild(p); closeErr != nil {
+			return errors.Join(err, closeErr)
+		}
 	}
 	m.clearDarwinChildLocked(p, err)
 	return err
@@ -501,8 +545,11 @@ func (m *Manager) refresh(ctx context.Context, raw string, tlsConfig *tls.Config
 		return err
 	}
 	startProfile := m.startLocalProfileLocked
-	if prior.mode == ModeTUN {
+	switch prior.mode {
+	case ModeTUN:
 		startProfile = m.startTUNProfileLocked
+	case ModeSystem:
+		startProfile = m.startSystemProfileLocked
 	}
 	if err = m.stopDarwinLocked(); err != nil {
 		return err

@@ -65,8 +65,8 @@ func TestDarwinLocalPortCollision(t *testing.T) {
 	if err := m.CheckMode(ModeTUN); err != nil {
 		t.Fatalf("TUN mode unavailable: %v", err)
 	}
-	if err := m.CheckMode(ModeSystem); err == nil {
-		t.Fatal("enabled the Windows system proxy mode on macOS")
+	if err := m.CheckMode(ModeSystem); err != nil {
+		t.Fatalf("system proxy mode unavailable: %v", err)
 	}
 	if err := m.CheckMode(ModeLocal); err != nil {
 		t.Fatalf("local mode unavailable: %v", err)

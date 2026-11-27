@@ -19,8 +19,6 @@ static NSString *const reopenNotification = @"ai.yungor.keydock-connect.reopen";
 @property NSTextField *proxyTitle;
 @property NSTextField *proxyStatus;
 @property NSTextField *proxyUpdated;
-@property NSTextField *proxyEndpoint;
-@property NSView *proxyEndpointRow;
 @property NSTextField *proxyNotice;
 @property NSTextField *diagnosticsNotice;
 @property NSTextField *toolsNotice;
@@ -35,10 +33,8 @@ static NSString *const reopenNotification = @"ai.yungor.keydock-connect.reopen";
 @property NSButton *networkCheckButton;
 @property NSPopUpButton *proxyModePicker;
 @property NSButton *proxyButton;
-@property NSButton *addressCopyButton;
 @property NSMenuItem *restoreItem;
 @property NSButton *exportButton;
-@property NSString *proxyAddress;
 @property int proxyMode;
 @property BOOL busy;
 @property BOOL quitting;
@@ -358,28 +354,23 @@ static NSGridView *checkGrid(NSArray<NSArray<NSView *> *> *checks, NSUInteger st
     NSStackView *proxyHeader = stack(@[heading(@"网络代理"), [NSView new], self.proxyTitle],
                                      NSUserInterfaceLayoutOrientationHorizontal, 8);
     self.proxyModePicker = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    [self.proxyModePicker addItemsWithTitles:@[@"本地代理", @"TUN（虚拟网卡）"]];
-    [self.proxyModePicker itemAtIndex:0].tag = KD_PROXY_LOCAL;
+    [self.proxyModePicker addItemsWithTitles:@[@"系统代理", @"TUN（虚拟网卡）"]];
+    [self.proxyModePicker itemAtIndex:0].tag = KD_PROXY_SYSTEM;
     [self.proxyModePicker itemAtIndex:1].tag = KD_PROXY_TUN;
     self.proxyModePicker.accessibilityLabel = @"代理模式";
     self.proxyModePicker.target = self;
     self.proxyModePicker.action = @selector(proxyModeChanged:);
     [self.proxyModePicker.widthAnchor constraintGreaterThanOrEqualToConstant:126].active = YES;
-    self.proxyButton = [self button:@"启用本地代理" action:@selector(toggleProxy:)];
-    self.addressCopyButton = [self button:@"复制地址" action:@selector(copyAddress:)];
+    self.proxyButton = [self button:@"启用系统代理" action:@selector(toggleProxy:)];
     self.proxyStatus = wrappedLabel(@"", 13, primary);
     self.proxyUpdated = wrappedLabel(@"", 12, secondary);
-    self.proxyEndpoint = label(@"", 13, NSFontWeightMedium, primary);
-    self.proxyEndpointRow = stack(@[self.proxyEndpoint, self.addressCopyButton, [NSView new]],
-                                  NSUserInterfaceLayoutOrientationHorizontal, 8);
     self.proxyNotice = wrappedLabel(@"", 13, secondary);
     self.proxyNotice.accessibilityIdentifier = @"keydock.proxy-notice";
     NSStackView *proxyControls = stack(@[label(@"代理模式", 13, NSFontWeightRegular, secondary), self.proxyModePicker,
                                         [NSView new], self.proxyButton], NSUserInterfaceLayoutOrientationHorizontal, 8);
-    KDSurface *proxyCard = surface(rows(@[proxyHeader, proxyControls, self.proxyStatus, self.proxyEndpointRow,
+    KDSurface *proxyCard = surface(rows(@[proxyHeader, proxyControls, self.proxyStatus,
                                          self.proxyUpdated, self.proxyNotice], 5), proxyFill, sectionInsets);
     proxyCard.cornerRadius = 10;
-    showRow(self.proxyEndpointRow, NO);
     showRow(self.proxyUpdated, NO);
     showRow(self.proxyNotice, NO);
 
@@ -432,7 +423,6 @@ static NSGridView *checkGrid(NSArray<NSArray<NSView *> *> *checks, NSUInteger st
         [footer.bottomAnchor constraintEqualToAnchor:root.bottomAnchor]
     ]];
 
-    self.proxyAddress = @"";
     self.busy = YES;
     [self updateButtons];
     [self.window center];
@@ -495,20 +485,18 @@ static NSGridView *checkGrid(NSArray<NSArray<NSView *> *> *checks, NSUInteger st
 }
 
 - (int)selectedProxyMode {
-    return self.proxyModePicker.selectedTag == KD_PROXY_TUN ? KD_PROXY_TUN : KD_PROXY_LOCAL;
+    return self.proxyModePicker.selectedTag == KD_PROXY_TUN ? KD_PROXY_TUN : KD_PROXY_SYSTEM;
 }
 
 - (void)renderProxy {
     int selected = [self selectedProxyMode];
     BOOL active = self.proxyMode != KD_PROXY_INACTIVE;
     BOOL idle = !self.busy && !self.quitting;
-    BOOL hasAddress = self.proxyMode == KD_PROXY_LOCAL && self.proxyAddress.length;
     self.proxyModePicker.enabled = idle;
     self.proxyButton.enabled = idle && (selected == self.proxyMode || self.subscription);
-    self.addressCopyButton.enabled = idle && hasAddress;
 
     NSString *title = @"未启用";
-    if (active) title = self.proxyMode == KD_PROXY_TUN ? @"TUN 已启用" : @"本地代理已启用";
+    if (active) title = self.proxyMode == KD_PROXY_TUN ? @"TUN 已启用" : @"系统代理已启用";
     NSString *action = !active ? @"启用" : (selected == self.proxyMode ? @"关闭" : @"切换至");
     NSString *detail;
     if (!self.subscription && !active) {
@@ -518,35 +506,29 @@ static NSGridView *checkGrid(NSArray<NSArray<NSView *> *> *checks, NSUInteger st
         detail = self.proxyMode == KD_PROXY_TUN ? @"流量正在通过虚拟网卡按订阅规则分流。" :
                                                   @"TUN 通过虚拟网卡分流。首次启用时可能需要在 macOS 中批准后台项目。";
     } else {
-        detail = hasAddress ? @"将下方地址填入需要代理的应用。" :
-                              @"启用后，将本地地址填入支持 HTTP 或 SOCKS5 代理的应用。";
+        detail = self.proxyMode == KD_PROXY_SYSTEM ? @"使用 macOS 系统代理的应用已按订阅规则分流。" :
+                                                     @"启用后，助手会自动设置 macOS 系统代理。";
     }
-    self.proxyButton.title = [action stringByAppendingString:selected == KD_PROXY_TUN ? @" TUN" : @"本地代理"];
+    self.proxyButton.title = [action stringByAppendingString:selected == KD_PROXY_TUN ? @" TUN" : @"系统代理"];
     self.proxyTitle.textColor = active ? success() : muted();
     setText(self.proxyTitle, title);
     setText(self.proxyStatus, detail);
-    setText(self.proxyEndpoint, hasAddress ? [@"HTTP / SOCKS5  " stringByAppendingString:self.proxyAddress] : @"");
-    showRow(self.proxyEndpointRow, hasAddress);
 }
 
-- (void)updateProxyMode:(int)mode address:(NSString *)address {
+- (void)updateProxyMode:(int)mode {
     self.proxyMode = mode;
-    self.proxyAddress = mode == KD_PROXY_LOCAL ? address : @"";
     [self updateButtons];
 }
 
 - (void)pollProxy:(NSTimer *)timer {
     if (self.busy || self.quitting || self.proxyMode == KD_PROXY_INACTIVE) return;
     int mode = kdMacProxyMode();
-    char *value = mode == KD_PROXY_LOCAL ? kdMacProxyAddress() : NULL;
-    NSString *address = str(value);
-    free(value);
-    if (self.proxyMode == mode && [self.proxyAddress isEqualToString:address]) return;
+    if (self.proxyMode == mode) return;
     int previousMode = self.proxyMode;
-    [self updateProxyMode:mode address:address];
+    [self updateProxyMode:mode];
     if (mode == KD_PROXY_INACTIVE) {
         NSString *notice = previousMode == KD_PROXY_TUN ? @"TUN 已停止。可重新启用或导出诊断日志。" :
-                                                           @"本地代理已停止。可重新启用或导出诊断日志。";
+                                                           @"系统代理已停止。可重新启用或导出诊断日志。";
         [self showNotice:notice failure:YES inField:self.proxyNotice];
     }
 }
@@ -633,16 +615,9 @@ static NSGridView *checkGrid(NSArray<NSArray<NSView *> *> *checks, NSUInteger st
 - (void)toggleProxy:(id)sender {
     int selected = [self selectedProxyMode];
     NSString *toggle = selected == self.proxyMode ? @"off" : @"on";
-    NSString *mode = selected == KD_PROXY_TUN ? @"tun" : @"local";
+    NSString *mode = selected == KD_PROXY_TUN ? @"tun" : @"system";
     NSString *progress = [NSString stringWithFormat:@"正在%@…", self.proxyButton.title];
     [self runAction:KD_PROXY first:toggle second:mode progress:progress inField:self.proxyNotice];
-}
-
-- (void)copyAddress:(id)sender {
-    if (self.proxyMode != KD_PROXY_LOCAL || !self.proxyAddress.length) return;
-    [NSPasteboard.generalPasteboard clearContents];
-    [NSPasteboard.generalPasteboard setString:self.proxyAddress forType:NSPasteboardTypeString];
-    [self showNotice:@"已复制本地代理地址。" failure:NO inField:self.proxyNotice];
 }
 
 - (void)restore:(id)sender {
@@ -706,10 +681,10 @@ void kdReopenWindow(void) {
 
 void kdSetState(const char *server, const char *device, const char *model,
                 int paired, int restorable, int subscription, int proxyMode,
-                const char *address, const char *updatedAt, int refreshFailed) {
+                const char *updatedAt, int refreshFailed) {
     @autoreleasepool {
         NSString *initialServer = server ? str(server) : nil;
-        NSString *deviceName = str(device), *modelName = str(model), *proxyAddress = str(address), *updated = str(updatedAt);
+        NSString *deviceName = str(device), *modelName = str(model), *updated = str(updatedAt);
         dispatch_async(dispatch_get_main_queue(), ^{
             if (ui.quitting) return;
             if (initialServer) {
@@ -729,7 +704,7 @@ void kdSetState(const char *server, const char *device, const char *model,
             }
             ui.restorable = restorable;
             ui.subscription = subscription;
-            [ui updateProxyMode:proxyMode address:proxyAddress];
+            [ui updateProxyMode:proxyMode];
             if (initialServer) [ui.window makeFirstResponder:paired ? ui.connectButton : ui.server];
             NSString *updatedText = updated.length ? [@"订阅最近更新  " stringByAppendingString:updated] : @"订阅尚未刷新";
             if (refreshFailed) updatedText = [updatedText stringByAppendingString:@"   ·   最近一次刷新失败"];

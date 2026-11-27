@@ -11,6 +11,13 @@
 		<string>KeyDockConnect</string>
 		<string>--tun-daemon</string>
 	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
 	<key>MachServices</key>
 	<dict>
 		<key>ai.yungor.keydock-connect.tun</key>

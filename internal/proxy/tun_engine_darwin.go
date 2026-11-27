@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"os"
@@ -21,25 +22,19 @@ import (
 const (
 	darwinTUNDevice  = "utun3917"
 	darwinTUNIPv4    = "198.18.0.1"
-	darwinTUNIPv6    = "fdfe:dcba:9876::1"
 	darwinTUNRuntime = "/private/var/tmp"
 )
 
 // These addresses are queried in the kernel's routing table only. Sample both
-// halves of IPv4 and the public IPv6 range to check actual route selection.
+// halves of IPv4 to check actual route selection.
 var darwinTUNProbeAddresses = [...]netip.Addr{
 	netip.MustParseAddr("1.0.0.1"),
 	netip.MustParseAddr("208.67.222.222"),
-	netip.MustParseAddr("2606:4700:4700::1111"),
 }
 
-func buildDarwinTUNProfile(body []byte, ipv6 bool) ([]byte, error) {
+func buildDarwinTUNProfile(body []byte) ([]byte, error) {
 	tun := makeTUNSettings(darwinTUNDevice)
-	addresses := []string{}
-	if ipv6 {
-		addresses = append(addresses, darwinTUNIPv6+"/126")
-	}
-	tun.Inet6Address = &addresses
+	tun.Inet6Address = &[]string{}
 	return buildRoutingProfileWithTUN(body, 0, false, ModeTUN, tun)
 }
 
@@ -51,11 +46,10 @@ func runDarwinTUN(ctx context.Context, corePath string, body []byte, notify func
 	}
 	startup, cancelStartup := context.WithTimeout(ctx, 12*time.Second)
 	defer cancelStartup()
-	ipv6, err := checkDarwinTUNStart(startup)
-	if err != nil {
+	if err := checkDarwinTUNStart(startup); err != nil {
 		return err
 	}
-	cfg, err := buildDarwinTUNProfile(body, ipv6)
+	cfg, err := buildDarwinTUNProfile(body)
 	if err != nil {
 		return err
 	}
@@ -84,7 +78,7 @@ func runDarwinTUN(ctx context.Context, corePath string, body []byte, notify func
 		cleanupErr := waitDarwinTUNCleanup()
 		result = errors.Join(result, stopErr, cleanupErr)
 	}()
-	if err = awaitDarwinTUN(startup, done, ipv6); err != nil {
+	if err = awaitDarwinTUN(startup, done); err != nil {
 		return err
 	}
 	if err = notify(); err != nil {
@@ -124,30 +118,27 @@ func prepareDarwinTUNRuntime(corePath string) (string, string, error) {
 	return dir, core, nil
 }
 
-func checkDarwinTUNStart(ctx context.Context) (bool, error) {
+func checkDarwinTUNStart(ctx context.Context) error {
 	clean, err := darwinTUNAbsent(ctx)
 	if err != nil {
-		return false, err
+		return err
 	}
 	if !clean {
-		return false, errors.New("KeyDock TUN 网卡已被占用或仍有接管路由，请先关闭使用该网卡的工具")
+		return errors.New("KeyDock TUN 网卡已被占用或仍有接管路由，请先关闭使用该网卡的工具")
 	}
-	ipv6 := false
 	for _, address := range darwinTUNProbeAddresses {
 		name, err := darwinRouteInterface(ctx, address)
 		if err != nil {
-			return false, err
+			return err
 		}
 		if strings.HasPrefix(name, "utun") || strings.HasPrefix(name, "tun") || strings.HasPrefix(name, "ipsec") || strings.HasPrefix(name, "ppp") {
-			return false, errors.New("另一个 macOS VPN 或 TUN 已接管互联网流量，请先在原工具中关闭")
+			return fmt.Errorf("IPv4 流量已由 VPN 接口 %s 接管。请先在原 VPN 或代理工具中断开连接，再启用 KeyDock TUN", name)
 		}
-		if address.Is6() {
-			ipv6 = name != ""
-		} else if name == "" {
-			return false, errors.New("macOS 当前没有可用的互联网路由，请先连接网络")
+		if name == "" {
+			return errors.New("macOS 当前没有可用的 IPv4 互联网路由，请先连接可访问 IPv4 的网络")
 		}
 	}
-	return ipv6, nil
+	return nil
 }
 
 func darwinRouteInterface(ctx context.Context, address netip.Addr) (string, error) {
@@ -161,10 +152,15 @@ func darwinRouteInterface(ctx context.Context, address netip.Addr) (string, erro
 	if ctx.Err() != nil {
 		return "", ctx.Err()
 	}
+	return parseDarwinRouteInterface(output, err)
+}
+
+func parseDarwinRouteInterface(output []byte, err error) (string, error) {
+	// BSD route can write this to stderr and still exit successfully.
+	if bytes.Contains(output, []byte("not in table")) {
+		return "", nil
+	}
 	if err != nil {
-		if bytes.Contains(output, []byte("not in table")) {
-			return "", nil
-		}
 		return "", errors.New("无法检查 macOS 互联网路由")
 	}
 	for _, line := range strings.Split(string(output), "\n") {
@@ -175,7 +171,7 @@ func darwinRouteInterface(ctx context.Context, address netip.Addr) (string, erro
 	return "", errors.New("无法识别 macOS 互联网路由接口")
 }
 
-func awaitDarwinTUN(ctx context.Context, done <-chan struct{}, ipv6 bool) error {
+func awaitDarwinTUN(ctx context.Context, done <-chan struct{}) error {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -185,7 +181,7 @@ func awaitDarwinTUN(ctx context.Context, done <-chan struct{}, ipv6 bool) error 
 		case <-done:
 			return errors.New("代理核心在 KeyDock TUN 网卡就绪前退出")
 		case <-ticker.C:
-			ready, err := darwinTUNReady(ctx, ipv6)
+			ready, err := darwinTUNReady(ctx)
 			if err != nil {
 				return err
 			}
@@ -196,7 +192,7 @@ func awaitDarwinTUN(ctx context.Context, done <-chan struct{}, ipv6 bool) error 
 	}
 }
 
-func darwinTUNReady(ctx context.Context, ipv6 bool) (bool, error) {
+func darwinTUNReady(ctx context.Context) (bool, error) {
 	iface, err := net.InterfaceByName(darwinTUNDevice)
 	if err != nil || iface.Flags&net.FlagUp == 0 {
 		return false, nil
@@ -205,22 +201,18 @@ func darwinTUNReady(ctx context.Context, ipv6 bool) (bool, error) {
 	if err != nil {
 		return false, nil
 	}
-	ipv4Assigned, ipv6Assigned := false, false
+	ipv4Assigned := false
 	for _, address := range addresses {
 		prefix, err := netip.ParsePrefix(address.String())
-		if err != nil {
-			continue
+		if err == nil && prefix.Addr().String() == darwinTUNIPv4 {
+			ipv4Assigned = true
+			break
 		}
-		ipv4Assigned = ipv4Assigned || prefix.Addr().String() == darwinTUNIPv4
-		ipv6Assigned = ipv6Assigned || prefix.Addr().String() == darwinTUNIPv6
 	}
-	if !ipv4Assigned || ipv6 && !ipv6Assigned {
+	if !ipv4Assigned {
 		return false, nil
 	}
 	for _, address := range darwinTUNProbeAddresses {
-		if address.Is6() && !ipv6 {
-			continue
-		}
 		name, err := darwinRouteInterface(ctx, address)
 		if name != darwinTUNDevice || err != nil {
 			return false, err

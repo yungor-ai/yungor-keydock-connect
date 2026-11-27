@@ -93,20 +93,18 @@ func publishMacState(state desktop.State, initial bool) {
 	}
 	device := C.CString(state.Device)
 	model := C.CString(state.Model)
-	address := C.CString(state.ProxyAddress)
 	updatedAt := C.CString(formatMacSubscriptionTime(state.SubscriptionUpdatedAt))
 	defer C.free(unsafe.Pointer(device))
 	defer C.free(unsafe.Pointer(model))
-	defer C.free(unsafe.Pointer(address))
 	defer C.free(unsafe.Pointer(updatedAt))
 	C.kdSetState(server, device, model, cFlag(state.Paired),
-		cFlag(state.Restorable), cFlag(state.Subscription), cProxyMode(state.ProxyMode), address, updatedAt, cFlag(state.SubscriptionRefreshFailed))
+		cFlag(state.Restorable), cFlag(state.Subscription), cProxyMode(state.ProxyMode), updatedAt, cFlag(state.SubscriptionRefreshFailed))
 }
 
 func cProxyMode(mode proxy.Mode) C.int {
 	switch mode {
-	case proxy.ModeLocal:
-		return C.KD_PROXY_LOCAL
+	case proxy.ModeSystem:
+		return C.KD_PROXY_SYSTEM
 	case proxy.ModeTUN:
 		return C.KD_PROXY_TUN
 	default:
@@ -165,11 +163,6 @@ func kdMacReady() {
 //export kdMacRecheckNetwork
 func kdMacRecheckNetwork() {
 	window.controller.RecheckNetwork()
-}
-
-//export kdMacProxyAddress
-func kdMacProxyAddress() *C.char {
-	return C.CString(window.controller.ProxyAddress())
 }
 
 //export kdMacProxyMode
@@ -242,17 +235,17 @@ func kdMacResumeActions() {
 func setMacProxyMode(controller *desktop.Controller, enable bool, mode proxy.Mode) (string, error) {
 	var label string
 	switch mode {
-	case proxy.ModeLocal:
-		label = "本地代理"
+	case proxy.ModeSystem:
+		label = "系统代理"
 	case proxy.ModeTUN:
 		label = "TUN 虚拟网卡"
-		if enable {
-			if err := authorizeDarwinTUN(); err != nil {
-				return "", err
-			}
-		}
 	default:
 		return "", errors.New("无效的代理模式")
+	}
+	if enable {
+		if err := authorizeDarwinProxyService(); err != nil {
+			return "", err
+		}
 	}
 	if err := controller.SetProxyMode(enable, mode); err != nil {
 		return "", err

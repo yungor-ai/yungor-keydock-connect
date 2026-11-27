@@ -19,7 +19,7 @@ enum {
 
 enum {
     KD_PROXY_INACTIVE,
-    KD_PROXY_LOCAL,
+    KD_PROXY_SYSTEM,
     KD_PROXY_TUN
 };
 
@@ -28,7 +28,7 @@ void kdShowError(const char *message);
 void kdReopenWindow(void);
 void kdSetState(const char *server, const char *device, const char *model,
                 int paired, int restorable, int subscription, int proxyMode,
-                const char *address, const char *updatedAt, int refreshFailed);
+                const char *updatedAt, int refreshFailed);
 void kdSetCheck(int row, const char *status, const char *message, const char *hint);
 void kdFinishOperation(const char *message, int failed);
 void kdOfferUpdate(const char *version);

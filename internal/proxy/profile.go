@@ -286,10 +286,8 @@ func buildRoutingProfileWithTUN(body []byte, port int, diagnostic bool, mode Mod
 			// The SS relay needs IPv4 destinations. Reject IPv6 on Windows while
 			// TUN is active so clients can fall back without bypassing the tunnel.
 			tun.StrictRoute = true
-			profile.IPv6 = new(false)
-		} else if tun.Inet6Address == nil || len(*tun.Inet6Address) > 0 {
-			profile.IPv6 = new(true)
 		}
+		profile.IPv6 = new(false)
 		profile.TUN = tun
 		// Use HTTP Host or TLS/QUIC SNI for domain rules without replacing the
 		// resolver's destination IP, which still drives the IP rules and dial.

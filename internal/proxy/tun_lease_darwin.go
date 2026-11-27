@@ -12,9 +12,11 @@ import (
 )
 
 const (
-	tunReplyLimit = 4096
-	tunStartLimit = 30 * time.Second
-	tunStopLimit  = 12 * time.Second
+	// Distinct from every supported YAML subscription (a mapping).
+	darwinSystemProxyRequest = "KeyDock-Set-System-Proxy/1"
+	tunReplyLimit            = 4096
+	tunStartLimit            = 30 * time.Second
+	tunStopLimit             = 12 * time.Second
 )
 
 // One open connection owns the routes. The first reply acknowledges startup,
@@ -31,7 +33,7 @@ func readTUNFrame(r io.Reader, limit uint32) ([]byte, error) {
 		return nil, err
 	}
 	if size > limit {
-		return nil, errors.New("TUN 消息超出大小限制")
+		return nil, errors.New("网络服务消息超出大小限制")
 	}
 	body := make([]byte, size)
 	_, err := io.ReadFull(r, body)
@@ -52,7 +54,7 @@ func writeTUNFrame(w io.Writer, body []byte) error {
 func readTUNReply(r io.Reader) error {
 	body, err := readTUNFrame(r, tunReplyLimit)
 	if err != nil {
-		return errors.New("TUN 后台服务的连接已中断")
+		return errors.New("KeyDock 网络后台服务的连接已中断")
 	}
 	if len(body) != 0 {
 		return errors.New(string(body))
@@ -62,7 +64,7 @@ func readTUNReply(r io.Reader) error {
 
 func openDarwinTUN(ctx context.Context, body []byte) (_ *darwinTUNLease, result error) {
 	if len(body) == 0 || len(body) > profileLimit {
-		return nil, errors.New("TUN 订阅配置无效或超出大小限制")
+		return nil, errors.New("网络服务请求为空或超出大小限制")
 	}
 	ctx, cancel := context.WithTimeout(ctx, tunStartLimit)
 	defer cancel()
@@ -82,7 +84,7 @@ func openDarwinTUN(ctx context.Context, body []byte) (_ *darwinTUNLease, result 
 		return nil, err
 	}
 	if err = writeTUNFrame(conn, body); err != nil {
-		return nil, errors.New("无法向 TUN 后台服务发送订阅配置")
+		return nil, errors.New("无法向 KeyDock 网络后台服务发送请求")
 	}
 	if err = readTUNReply(conn); err != nil {
 		return nil, err
@@ -111,6 +113,6 @@ func (l *darwinTUNLease) stop() error {
 	case <-l.done:
 		return l.err
 	case <-timer.C:
-		return errors.New("TUN 后台服务未能及时确认路由恢复")
+		return errors.New("KeyDock 网络后台服务未能及时确认网络设置已恢复")
 	}
 }
