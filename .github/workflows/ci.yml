@@ -71,8 +71,8 @@ jobs:
           go test -c -o "$RUNNER_TEMP/keydock-proxy.test" ./internal/proxy
           sudo env KEYDOCK_MACOS_SYSTEM_PROXY_E2E=1 "$RUNNER_TEMP/keydock-proxy.test" \
             -test.v -test.run '^TestDarwinSystemProxyPreferencesLifecycle$'
-          sudo env KEYDOCK_DARWIN_TUN_E2E=1 KEYDOCK_TEST_CORE="$PWD/dist/macos/KeyDock Connect.app/Contents/Resources/core/mihomo" \
-            "$RUNNER_TEMP/keydock-proxy.test" -test.v -test.run '^TestDarwinTUNRouteLifecycle$'
+          sudo env KEYDOCK_DARWIN_TUN_E2E=1 KEYDOCK_DARWIN_DNS_E2E=1 KEYDOCK_TEST_CORE="$PWD/dist/macos/KeyDock Connect.app/Contents/Resources/core/mihomo" \
+            "$RUNNER_TEMP/keydock-proxy.test" -test.v -test.run '^TestDarwinTUN(Route|SystemDNS)Lifecycle$'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: KeyDockConnect-macos-arm64

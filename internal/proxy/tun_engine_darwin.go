@@ -34,6 +34,9 @@ var darwinTUNProbeAddresses = [...]netip.Addr{
 
 func buildDarwinTUNProfile(body []byte) ([]byte, error) {
 	tun := makeTUNSettings(darwinTUNDevice)
+	// sing-tun publishes a process-scoped default resolver in SystemConfiguration.
+	// Leave dns-hijack empty so domain-specific VPN resolvers can answer directly.
+	tun.DNSMode = "native"
 	tun.Inet6Address = &[]string{}
 	return buildRoutingProfileWithTUN(body, 0, false, ModeTUN, tun)
 }

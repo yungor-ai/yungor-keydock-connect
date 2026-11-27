@@ -34,10 +34,11 @@ allow-lan: true
 	if err := yaml.Unmarshal(config, &profile); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"dns", "external-controller"} {
-		if _, found := profile[key]; found {
-			t.Errorf("subscription controlled %q", key)
-		}
+	if _, found := profile["external-controller"]; found {
+		t.Error("subscription exposed an external controller")
+	}
+	if bytes.Contains(config, []byte("untrusted.invalid")) {
+		t.Error("subscription controlled a DNS resolver")
 	}
 	if profile["ipv6"] != false {
 		t.Errorf("expected explicit ipv6: false, got %v", profile["ipv6"])
@@ -46,7 +47,7 @@ allow-lan: true
 		t.Fatalf("TUN exposed a listener: %#v", profile)
 	}
 	tun := profile["tun"].(map[string]any)
-	if tun["device"] != darwinTUNDevice || tun["dns-mode"] != "disabled" || tun["auto-route"] != true ||
+	if tun["device"] != darwinTUNDevice || tun["dns-mode"] != "native" || tun["auto-route"] != true ||
 		!reflect.DeepEqual(tun["dns-hijack"], []any{}) || !reflect.DeepEqual(tun["inet6-address"], []any{}) {
 		t.Fatalf("unexpected TUN settings: %#v", tun)
 	}

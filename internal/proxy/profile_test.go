@@ -221,3 +221,37 @@ func TestDiagnosticProfileForcesOnlyDeviceNode(t *testing.T) {
 		t.Fatal("invalid subscription accepted as healthy")
 	}
 }
+
+func TestNativeTUNDNSUsesOnlyTrustedIPv4Upstreams(t *testing.T) {
+	// Labels are valid subscription data but unsafe to embed in a DoH fragment.
+	const node = "name&key=value"
+	src := strings.ReplaceAll(fixture, "test-node", node)
+	src = strings.ReplaceAll(src, "Auto", "KeyDock-DNS")
+	src += "dns: {listen: '0.0.0.0:53', ipv6: true, nameserver: ['https://untrusted.invalid/dns-query']}\n"
+	tun := makeTUNSettings("utun3917")
+	tun.DNSMode = "native"
+	raw, err := buildRoutingProfileWithTUN([]byte(src), 0, false, ModeTUN, tun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg struct {
+		routing `yaml:",inline"`
+		DNS     dnsSettings `yaml:"dns"`
+	}
+	if err = yaml.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	dns := cfg.DNS
+	if !dns.Enable || dns.IPv6 || dns.EnhancedMode != "fake-ip" || dns.FakeIPRange != "198.18.0.1/16" ||
+		bytes.Contains(raw, []byte("untrusted.invalid")) || bytes.Contains(raw, []byte("listen:")) {
+		t.Fatal("native TUN DNS must use the owned IPv4 configuration")
+	}
+	alias := cfg.Groups[len(cfg.Groups)-1]
+	if alias.Name != "KeyDock-DNS-1" || alias.Type != "select" || !reflect.DeepEqual(alias.Proxies, []string{node}) ||
+		!reflect.DeepEqual(dns.NameServer, []string{"https://1.1.1.1/dns-query#" + alias.Name, "https://8.8.8.8/dns-query#" + alias.Name}) {
+		t.Fatal("public DNS must dial through a validated device without interpreting its label as URL options")
+	}
+	if len(dns.ProxyServerNameServer) == 0 || !reflect.DeepEqual(dns.ProxyServerNameServer, dns.DefaultNameServer) {
+		t.Fatal("relay bootstrap must work before the relay is connected")
+	}
+}

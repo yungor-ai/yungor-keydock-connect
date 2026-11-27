@@ -60,6 +60,44 @@ type tunSettings struct {
 	MTU                 int       `yaml:"mtu,omitempty"`
 }
 
+// Mihomo's native macOS resolver intercepts only queries to its utun address.
+type dnsSettings struct {
+	Enable                      bool                `yaml:"enable"`
+	IPv6                        bool                `yaml:"ipv6"`
+	EnhancedMode                string              `yaml:"enhanced-mode"`
+	FakeIPRange                 string              `yaml:"fake-ip-range"`
+	FakeIPFilter                []string            `yaml:"fake-ip-filter"`
+	NameServer                  []string            `yaml:"nameserver"`
+	NameServerPolicy            map[string][]string `yaml:"nameserver-policy"`
+	DefaultNameServer           []string            `yaml:"default-nameserver"`
+	ProxyServerNameServer       []string            `yaml:"proxy-server-nameserver"`
+	ProxyServerNameServerPolicy map[string][]string `yaml:"proxy-server-nameserver-policy"`
+}
+
+func nativeTUNDNS(cfg *routing, names map[string]bool) *dnsSettings {
+	// Mihomo interprets '&' and '=' in a DoH URL fragment even after URL
+	// escaping. Only interpolate a locally assigned adapter name.
+	const base = "KeyDock-DNS"
+	adapter := base
+	for n := 1; names[adapter]; n++ {
+		adapter = base + "-" + strconv.Itoa(n)
+	}
+	cfg.Groups = append(cfg.Groups, proxyGroup{Name: adapter, Type: "select", Proxies: []string{cfg.Proxies[0].Name}})
+
+	// A hostname-based relay must resolve before it can transport DNS.
+	// IPv4 literal DoH endpoints also avoid bootstrapping DoH with DHCP DNS.
+	bootstrap := []string{"https://223.5.5.5/dns-query", "https://223.6.6.6/dns-query"}
+	local := []string{"localhost", "+.localhost", "+.local", "+.lan", "+.internal", "+.home.arpa", "+.in-addr.arpa", "+.ip6.arpa"}
+	privatePolicy := strings.Join(local, ",")
+	return &dnsSettings{
+		Enable: true, EnhancedMode: "fake-ip", FakeIPRange: "198.18.0.1/16", FakeIPFilter: local,
+		NameServer:        []string{"https://1.1.1.1/dns-query#" + adapter, "https://8.8.8.8/dns-query#" + adapter},
+		NameServerPolicy:  map[string][]string{privatePolicy: {"system"}, "geosite:cn": bootstrap},
+		DefaultNameServer: bootstrap, ProxyServerNameServer: bootstrap,
+		ProxyServerNameServerPolicy: map[string][]string{privatePolicy: {"system"}},
+	}
+}
+
 type snifferSettings struct {
 	Enable              bool                    `yaml:"enable"`
 	ParsePureIP         bool                    `yaml:"parse-pure-ip"`
@@ -275,6 +313,7 @@ func buildRoutingProfileWithTUN(body []byte, port int, diagnostic bool, mode Mod
 		Log           string           `yaml:"log-level"`
 		GeoAutoUpdate bool             `yaml:"geo-auto-update"`
 		IPv6          *bool            `yaml:"ipv6,omitempty"`
+		DNS           *dnsSettings     `yaml:"dns,omitempty"`
 		TUN           *tunSettings     `yaml:"tun,omitempty"`
 		Sniffer       *snifferSettings `yaml:"sniffer,omitempty"`
 	}{Routing: cfg, Port: port, Bind: "127.0.0.1", Mode: "rule", Log: "silent"}
@@ -293,6 +332,9 @@ func buildRoutingProfileWithTUN(body []byte, port int, diagnostic bool, mode Mod
 			tun.StrictRoute = true
 		}
 		profile.TUN = tun
+		if tun.DNSMode == "native" {
+			profile.DNS = nativeTUNDNS(&profile.Routing, names)
+		}
 		// Use HTTP Host or TLS/QUIC SNI for domain rules without replacing the
 		// resolver's destination IP, which still drives the IP rules and dial.
 		profile.Sniffer = &snifferSettings{
