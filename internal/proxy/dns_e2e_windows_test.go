@@ -268,7 +268,9 @@ func TestWindowsTUNSystemDNSLifecycle(t *testing.T) {
 	// Windows DNS cache and also verify the certificate against the real SNI.
 	suffix := fmt.Sprintf("-%d.example.com", time.Now().UnixNano())
 	system, legacy, current, after := "system"+suffix, "legacy"+suffix, "tun"+suffix, "after"+suffix
-	wrong := netip.MustParseAddr("198.18.250.230")
+	// Model a wrong but ordinary public A record with a documentation address.
+	// An address inside Mihomo's fake pool can be rejected before SS routing.
+	wrong := netip.MustParseAddr("203.0.113.41")
 	private := netip.MustParseAddr("10.74.63.52")
 	zone := "office" + suffix
 	beforeSplit, duringSplit, afterSplit := "before."+zone, "during."+zone, "after."+zone
@@ -280,7 +282,7 @@ func TestWindowsTUNSystemDNSLifecycle(t *testing.T) {
 	checkWindowsSystemAnswer(t, beforeSplit, private, false)
 	checkWindowsSystemAnswer(t, system, wrong, false)
 	peer := newWindowsHTTPSPeer(t, core, map[string]bool{
-		system + ":443": true, current + ":443": true, wrong.String() + ":443": false,
+		system + ":443": true, legacy + ":443": true, current + ":443": true, wrong.String() + ":443": false,
 	})
 	rules := "DOMAIN-SUFFIX,example.com,test-node\n  - IP-CIDR," + wrong.String() + "/32,test-node,no-resolve\n  - MATCH,DIRECT"
 	source := []byte(strings.Replace(peerSubscription(peer.ssPort), "MATCH,test-node", rules, 1))
@@ -337,6 +339,8 @@ func TestWindowsTUNSystemDNSLifecycle(t *testing.T) {
 	checkWindowsSystemAnswer(t, legacy, wrong, false)
 	if err := peer.request(legacy, nil); err == nil {
 		t.Fatal("legacy TUN unexpectedly completed HTTPS to the fixture's unusable address")
+	} else {
+		t.Logf("legacy TUN HTTPS: %v", err)
 	}
 	peer.checkExit(t, wrong.String()+":443")
 	stop()
