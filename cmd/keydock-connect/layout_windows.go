@@ -71,12 +71,14 @@ func (ui *nativeWindow) build(icon *walk.Icon) error {
 
 	header := d.Composite{
 		Background: colors.header,
+		MinSize:    d.Size{Height: 64},
+		MaxSize:    d.Size{Height: 64},
 		Layout:     d.HBox{Margins: d.Margins{Left: 22, Top: 9, Right: 22, Bottom: 10}, Spacing: 12},
 		Children: []d.Widget{
 			d.ImageView{Image: icon, Mode: d.ImageViewModeZoom, MinSize: d.Size{Width: 40, Height: 40}, MaxSize: d.Size{Width: 40, Height: 40}},
 			d.Composite{Layout: d.VBox{MarginsZero: true, Spacing: 2}, Children: []d.Widget{
 				d.Label{Text: "KeyDock Connect", Font: uiFont(16, true), TextColor: colors.ink},
-				note(&ui.device),
+				d.Label{AssignTo: &ui.device, TextColor: colors.muted, NoPrefix: true, EllipsisMode: d.EllipsisEnd},
 			}},
 		},
 	}
@@ -184,7 +186,7 @@ func (ui *nativeWindow) build(icon *walk.Icon) error {
 	}
 	err := (d.MainWindow{
 		AssignTo: &ui.window, Title: "KeyDock Connect v" + keydockconnect.Version(), Visible: false, Icon: icon,
-		Font: uiFont(10, false), Size: d.Size{Width: 720, Height: 710}, MinSize: d.Size{Width: 520, Height: 360},
+		Font: uiFont(10, false), MinSize: d.Size{Width: 520, Height: 360},
 		Layout: d.VBox{MarginsZero: true, SpacingZero: true}, Children: []d.Widget{header, body, footer},
 	}).Create()
 	if err != nil {

@@ -27,7 +27,8 @@ type nativeWindow struct {
 	window                        *walk.MainWindow
 	scroll                        *walk.ScrollView
 	server, key                   *walk.LineEdit
-	device, message               *walk.TextLabel
+	device                        *walk.Label
+	message                       *walk.TextLabel
 	connectionNotice              *walk.TextLabel
 	proxyHint, tunHint            *walk.TextLabel
 	subscriptionHint              *walk.TextLabel
@@ -115,8 +116,8 @@ func runWindow(dir string, controller *desktop.Controller) error {
 	ui.server.TextChanged().Attach(ui.updateConnectionGuidance)
 	ui.key.TextChanged().Attach(ui.updateConnectionGuidance)
 	ui.renderChecks()
-	ui.fitWindowToMonitor()
 	ui.window.Show() // Starts the form exactly once, after all handlers are ready.
+	ui.fitWindowToMonitor()
 	enteredLoop = true
 	lifetime, stopBackground := context.WithCancel(context.Background())
 	go controller.RefreshSubscriptions(lifetime, func() {
@@ -222,15 +223,18 @@ func (ui *nativeWindow) createTray(icon *walk.Icon, register func() (*walk.Notif
 }
 
 func (ui *nativeWindow) fitWindowToMonitor() {
+	// Walk initially measures the scrollable form at its minimum size.
+	// Size the shown form explicitly so those bounds never become the default.
+	preferred := ui.window.SizeFrom96DPI(walk.Size{Width: 720, Height: 710})
 	workArea := ui.window.Monitor().WorkArea()
-	if workArea.Width <= 0 || workArea.Height <= 0 {
-		return
-	}
 	bounds := ui.window.BoundsPixels()
-	bounds.Width = min(bounds.Width, workArea.Width)
-	bounds.Height = min(bounds.Height, workArea.Height)
-	bounds.X = workArea.X + (workArea.Width-bounds.Width)/2
-	bounds.Y = workArea.Y + (workArea.Height-bounds.Height)/2
+	bounds.Width, bounds.Height = preferred.Width, preferred.Height
+	if workArea.Width > 0 && workArea.Height > 0 {
+		bounds.Width = min(bounds.Width, workArea.Width)
+		bounds.Height = min(bounds.Height, workArea.Height)
+		bounds.X = workArea.X + (workArea.Width-bounds.Width)/2
+		bounds.Y = workArea.Y + (workArea.Height-bounds.Height)/2
+	}
 	ui.window.SetBoundsPixels(bounds)
 }
 

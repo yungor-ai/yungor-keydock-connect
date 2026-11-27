@@ -163,6 +163,24 @@ public static class KeyDockWindowProbe {
         return RowValue(window,stage,state,true)!=IntPtr.Zero &&
             (string.IsNullOrEmpty(detail) || RowValue(window,stage,detail,false)!=IntPtr.Zero);
     }
+    public static void AssertControlInViewport(IntPtr window,IntPtr control,string description){
+        Rect bounds;
+        if(control==IntPtr.Zero || !IsWindowVisible(control) || !GetWindowRect(control,out bounds) ||
+           bounds.right<=bounds.left || bounds.bottom<=bounds.top){
+            throw new Exception("Missing visible native control: "+description);
+        }
+        // IsWindowVisible checks styles without testing clipping by the scroll viewport.
+        for(var parent=GetParent(control);parent!=IntPtr.Zero;parent=GetParent(parent)){
+            Rect client;
+            var origin=new Point();
+            if(!GetClientRect(parent,out client) || !ClientToScreen(parent,ref origin))break;
+            client.left+=origin.X; client.right+=origin.X;
+            client.top+=origin.Y; client.bottom+=origin.Y;
+            if(!Contains(client,bounds))throw new Exception("Native control clipped by its viewport: "+description);
+            if(parent==window)return;
+        }
+        throw new Exception("Could not read native control viewport: "+description);
+    }
     public static void AssertReadableLabel(IntPtr window,string text){
         var label=Child(window,"label",text);
         Rect client;

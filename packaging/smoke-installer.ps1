@@ -223,6 +223,9 @@ try {
         throw 'The native window still contains the Open Codex button.'
     }
     [KeyDockWindowProbe]::Capture($handle,(Join-Path $shots '01-first-launch.png'),'设备接入')
+    [KeyDockWindowProbe]::AssertControlInViewport($handle,$serverField,'服务器地址')
+    [KeyDockWindowProbe]::AssertControlInViewport($handle,$keyField,'设备密钥')
+    [KeyDockWindowProbe]::AssertControlInViewport($handle,$startButton,'连接并测试')
     [KeyDockWindowProbe]::SelectTray($initialSink)
     [KeyDockWindowProbe]::Enter($serverField,$origin)
     [KeyDockWindowProbe]::Click([KeyDockWindowProbe]::Child($handle,'button','检查更新'))
@@ -242,6 +245,8 @@ try {
         [KeyDockWindowProbe]::CheckStatus($handle,'设备授权','失败','401') -and $retry -ne [IntPtr]::Zero
     }
     [KeyDockWindowProbe]::Capture($handle,(Join-Path $shots '02-device-key-error.png'),'设备接入')
+    $credentialError = [KeyDockWindowProbe]::Child($handle,'label-prefix','服务拒绝了当前密钥（HTTP 401）。请核对服务器地址')
+    [KeyDockWindowProbe]::AssertControlInViewport($handle,$credentialError,'设备密钥错误提示')
     $diagnosticsPath = Join-Path $testRoot 'connection-diagnostics.json'
     [KeyDockWindowProbe]::ClickForModal([KeyDockWindowProbe]::Child($handle,'button','导出诊断日志'))
     $saveDialog = Wait-For 'native diagnostics save dialog' {
