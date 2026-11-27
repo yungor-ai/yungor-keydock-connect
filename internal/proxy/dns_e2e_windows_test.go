@@ -108,8 +108,9 @@ func (p *windowsHTTPSPeer) checkExit(t *testing.T, expected string) {
 	}
 }
 func (p *windowsHTTPSPeer) request(authority string, proxyURL *url.URL, addresses ...string) error {
-	transport := p.target.Client().Transport.(*http.Transport).Clone()
-	transport.Proxy = nil
+	// httptest's own dialer sends *.example.com directly to the origin.
+	// Reuse only its trust roots so TUN requests exercise Windows DNS and TCP.
+	transport := &http.Transport{TLSClientConfig: p.target.Client().Transport.(*http.Transport).TLSClientConfig.Clone()}
 	if proxyURL != nil {
 		transport.Proxy = http.ProxyURL(proxyURL)
 	}
