@@ -164,7 +164,8 @@ func validStage(value string) bool {
 		"codex.restore", "codex.launch", "app.shutdown", "proxy.subscription", "proxy.local_port", "proxy.profile", "proxy.core_integrity",
 		"proxy.core_data", "proxy.core_process", "proxy.core_job", "proxy.core_ready", "proxy.settings_apply", "proxy.settings_restore",
 		"proxy.worker_exit", "proxy.test_local_dial", "proxy.test_connect", "proxy.test_tls", "proxy.test_https", "proxy.subscription_refresh",
-		"proxy.tun_ready", "proxy.tun_cleanup", "proxy.refresh", "proxy.subscription_status":
+		"proxy.tun_ready", "proxy.tun_cleanup", "proxy.refresh", "proxy.subscription_status",
+		"proxy.tun_adapter", "proxy.tun_ipv4_address", "proxy.tun_default_route", "proxy.tun_mtu", "proxy.tun_ipv4_best", "proxy.tun_ipv6_best", "proxy.tun_core_ready":
 		return true
 	}
 	return false
@@ -185,12 +186,20 @@ func validHTTPStatus(value int) int {
 	return 0
 }
 
+func tunCoreClass(value string) bool {
+	switch value {
+	case "tun_core_adapter", "tun_core_interface_lookup", "tun_core_ipv4", "tun_core_dns", "tun_core_firewall", "tun_core_monitor", "tun_core_initialization":
+		return true
+	}
+	return false
+}
+
 func validErrorClass(value string) bool {
 	switch value {
 	case "", "canceled", "timeout", "dns", "tls_certificate", "tls_protocol", "connection_refused", "connection_reset", "network_unreachable", "permission", "missing_file", "eof", "other":
 		return true
 	}
-	return false
+	return tunCoreClass(value)
 }
 
 func errorClass(err error) string {
@@ -202,6 +211,12 @@ func errorClass(err error) string {
 	var header tls.RecordHeaderError
 	var alert tls.AlertError
 	var network net.Error
+	var coreFailure interface{ DiagnosticClass() string }
+	if errors.As(err, &coreFailure) {
+		if class := coreFailure.DiagnosticClass(); tunCoreClass(class) {
+			return class
+		}
+	}
 	switch {
 	case err == nil:
 		return ""

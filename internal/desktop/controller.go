@@ -21,7 +21,7 @@ import (
 )
 
 type Proxy interface {
-	StartMode(string, proxy.Mode) error
+	StartMode(context.Context, string, proxy.Mode) error
 	CheckMode(proxy.Mode) error
 	Stop() error
 	ActiveMode() proxy.Mode
@@ -337,7 +337,10 @@ func proxyClockHint(skew time.Duration) string {
 	return "检测到本机时钟比 KeyDock 服务端" + direction + "了 30 秒以上。" + syncTime
 }
 
-func (c *Controller) SetProxyMode(on bool, mode proxy.Mode) error {
+func (c *Controller) SetProxyMode(ctx context.Context, on bool, mode proxy.Mode) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if !c.operation.TryLock() {
 		return errBusy
 	}
@@ -371,9 +374,10 @@ func (c *Controller) SetProxyMode(on bool, mode proxy.Mode) error {
 				return err
 			}
 		}
-		if err := c.proxy.StartMode(url, mode); err != nil {
-			if active != "" {
-				if restoreErr := c.proxy.StartMode(url, active); restoreErr != nil {
+		if err := c.proxy.StartMode(ctx, url, mode); err != nil {
+			// On shutdown the shell cancels the action, then closes all proxies.
+			if active != "" && ctx.Err() == nil {
+				if restoreErr := c.proxy.StartMode(ctx, url, active); restoreErr != nil {
 					return errors.Join(err, fmt.Errorf("无法恢复原代理：%w", restoreErr))
 				}
 			}
@@ -441,7 +445,7 @@ func (c *Controller) Restore() error {
 	return c.recordAction("codex.restore", func() error { return c.ops.Restore(c.home, c.stateDir) })
 }
 
-// The shell cancels any in-progress Connect before calling Close. Wait until it
+// The shell cancels any in-progress action before calling Close. Wait until it
 // releases the operation so a racing proxy toggle cannot run after shutdown.
 func (c *Controller) Close() error {
 	c.operation.Lock()

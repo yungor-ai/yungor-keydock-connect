@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"strings"
 	"time"
@@ -57,7 +56,7 @@ func reserveTUN() (windows.Handle, error) {
 	return 0, errors.New("另一个 KeyDock Connect 实例正在使用 TUN。请先关闭该实例的 TUN")
 }
 
-func checkTUNStart() error {
+func checkTUNStart(ctx context.Context) error {
 	current, err := currentSettings()
 	if err != nil {
 		return err
@@ -66,7 +65,7 @@ func checkTUNStart() error {
 	if current.Flags&manualOrScript != 0 {
 		return errors.New("Windows 已开启手动代理或代理设置脚本。请关闭该设置后再启用 TUN")
 	}
-	return waitForTUNIdle()
+	return waitForTUNIdle(ctx)
 }
 
 // sing-tun derives the Wintun adapter's requested GUID from its device name.
@@ -151,78 +150,107 @@ func selectInterface(address unsafe.Pointer) (uint32, error) {
 	return index, nil
 }
 
+type tunWaitStep struct{ stage, message string }
+
+var (
+	tunWaitCore         = tunWaitStep{"proxy.tun_core_ready", "代理核心尚未完成 TUN 初始化"}
+	tunWaitAdapter      = tunWaitStep{"proxy.tun_adapter", "Windows 尚未准备好 KeyDockTun 虚拟网卡"}
+	tunWaitIPv4Address  = tunWaitStep{"proxy.tun_ipv4_address", "KeyDockTun 尚未获得所需的 IPv4 地址 198.18.0.1/30"}
+	tunWaitDefaultRoute = tunWaitStep{"proxy.tun_default_route", "Windows 尚未为 KeyDockTun 建立 IPv4 默认路由"}
+	tunWaitMTU          = tunWaitStep{"proxy.tun_mtu", "KeyDockTun 的 IPv4 MTU 尚未设置为 1500"}
+	tunWaitIPv4Route    = tunWaitStep{"proxy.tun_ipv4_best", "Windows 尚未将 IPv4 流量路由到 KeyDockTun"}
+	tunWaitIPv6Route    = tunWaitStep{"proxy.tun_ipv6_best", "Windows 已为 KeyDockTun 建立 IPv6 路由，但尚未选用该网卡"}
+)
+
 func (m *Manager) awaitTUN(ctx context.Context, p *child) (resultErr error) {
 	started := time.Now()
 	defer func() { m.logStage("proxy.tun_ready", started, resultErr) }()
-	deadline := time.NewTimer(8 * time.Second)
+	// The mixed listener starts first. Wintun 0.14.1 can wait 15s for its
+	// device interface and Mihomo's Windows tunNew allows three attempts.
+	deadline := time.NewTimer(60 * time.Second)
 	defer deadline.Stop()
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
+	pending := &tunWaitAdapter
 	var lastErr error
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case err := <-p.tunStartupFailure:
+			return err
 		case <-p.done:
-			return errors.New("代理核心在 TUN 网卡就绪前退出")
+			return p.tunStartupError(errors.New("代理核心在 TUN 网卡就绪前退出"))
 		case <-deadline.C:
-			return errors.Join(errors.New("Windows TUN 网卡或接管路由未就绪，请检查权限及其他代理或 VPN"), lastErr)
+			if err := p.tunStartupError(nil); err != nil {
+				return err
+			}
+			if lastErr == nil {
+				lastErr = context.DeadlineExceeded
+			}
+			m.logStage(pending.stage, started, lastErr)
+			return errors.New(pending.message + "。请在窗口底部导出诊断日志，交给管理员查看。")
 		case <-ticker.C:
-			var ready bool
-			ready, lastErr = p.tunReady()
-			if ready {
-				return nil
+			pending, lastErr = p.pendingTUNStep()
+			if pending == nil {
+				// Addresses and routes are visible before strict-route finishes
+				// installing its filters. Also require the core's TUN listen event.
+				select {
+				case <-p.tunCoreReady:
+					return p.tunStartupError(nil)
+				default:
+					pending = &tunWaitCore
+				}
 			}
 		}
 	}
 }
 
-func (p *child) tunReady() (bool, error) {
-	luid, index, err := lookupTUNAdapter(false)
-	if err != nil || luid == 0 {
-		return false, err
+func (p *child) pendingTUNStep() (*tunWaitStep, error) {
+	row, err := tunInterface(false)
+	if err != nil || row == nil || row.InterfaceLuid == 0 || row.InterfaceIndex == 0 ||
+		!strings.EqualFold(windows.UTF16ToString(row.Alias[:]), tunDeviceName) {
+		return &tunWaitAdapter, err
 	}
-	nic, err := net.InterfaceByIndex(int(index))
-	if err != nil || !strings.EqualFold(nic.Name, tunDeviceName) {
-		return false, err
-	}
-	addresses, err := nic.Addrs()
-	if err != nil {
-		return false, err
-	}
-	var ipv4Assigned bool
-	for _, address := range addresses {
-		ipv4Assigned = ipv4Assigned || address.String() == "198.18.0.1/30"
-	}
+	// GetIfTable2Ex can see Wintun before Go's GetAdaptersAddresses snapshot.
+	// Use the identified adapter's LUID throughout instead of matching it again.
+	luid := row.InterfaceLuid
 	p.tunLUID = luid
+	address := windows.MibUnicastIpAddressRow{InterfaceLuid: luid}
+	*(*windows.RawSockaddrInet4)(unsafe.Pointer(&address.Address)) = windows.RawSockaddrInet4{
+		Family: windows.AF_INET, Addr: [4]byte{198, 18, 0, 1},
+	}
+	if err := windows.GetUnicastIpAddressEntry(&address); err != nil || address.OnLinkPrefixLength != 30 {
+		return &tunWaitIPv4Address, err
+	}
 	routes, err := tunRoutes(luid)
 	if err != nil {
-		return false, err
+		return &tunWaitDefaultRoute, err
 	}
 	var ipv4Route, ipv6Route bool
 	for _, route := range routes {
 		ipv4Route = ipv4Route || route.DestinationPrefix.Prefix.Family == windows.AF_INET
 		ipv6Route = ipv6Route || route.DestinationPrefix.Prefix.Family == windows.AF_INET6
 	}
-	// A reused adapter can retain an IPv6 address from an older version.
-	// Only verify IPv6 route selection when this session installed a route.
-	if !ipv4Assigned || !ipv4Route {
-		return false, nil
+	if !ipv4Route {
+		return &tunWaitDefaultRoute, nil
 	}
 	// Wintun publishes its routes before applying the adapter's MTU.
 	ipv4Interface := windows.MibIpInterfaceRow{Family: windows.AF_INET, InterfaceLuid: luid}
 	if err := windows.GetIpInterfaceEntry(&ipv4Interface); err != nil || ipv4Interface.NlMtu != windowsTUNMTU {
-		return false, err
+		return &tunWaitMTU, err
 	}
-	selected, err := getBestInterface()
-	if err != nil || selected != index {
-		return false, err
+	if selected, err := getBestInterface(); err != nil || selected != row.InterfaceIndex {
+		return &tunWaitIPv4Route, err
 	}
+	// A reused adapter can retain an IPv6 address from an older version.
+	// Only verify IPv6 route selection when this session installed a route.
 	if ipv6Route {
-		selected, err = getBestIPv6Interface()
-		return selected == index, err
+		if selected, err := getBestIPv6Interface(); err != nil || selected != row.InterfaceIndex {
+			return &tunWaitIPv6Route, err
+		}
 	}
-	return true, nil
+	return nil, nil
 }
 
 // Mihomo handles Go's Interrupt signal by closing the TUN listener and Wintun
@@ -283,8 +311,10 @@ func (p *child) clearTUNRoutes() error {
 // With the machine-wide reservation held, allow sing-tun to reopen its own
 // idle adapter. Windows can keep the network-interface row after it unplugs
 // a software device. No routed or unrelated adapter may be reused.
-func waitForTUNIdle() error {
+func waitForTUNIdle(ctx context.Context) error {
 	deadline := time.Now().Add(3 * time.Second)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
 	for {
 		row, err := tunInterface(true)
 		if err != nil || row == nil {
@@ -305,7 +335,11 @@ func waitForTUNIdle() error {
 		if time.Now().After(deadline) {
 			return fmt.Errorf("KeyDockTun 网卡未进入空闲状态（状态 %d，默认路由 %d）。请重启 Windows 后再启用 TUN", row.OperStatus, len(routes))
 		}
-		time.Sleep(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
 	}
 }
 

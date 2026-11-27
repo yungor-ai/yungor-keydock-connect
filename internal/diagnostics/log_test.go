@@ -81,3 +81,36 @@ func TestExportFiltersUnrecognizedStoredFields(t *testing.T) {
 		t.Fatalf("expected only known diagnostic fields: %s", exported)
 	}
 }
+
+type classifiedError string
+
+func (e classifiedError) Error() string           { return "private diagnostic source" }
+func (e classifiedError) DiagnosticClass() string { return string(e) }
+
+func TestTUNDiagnosticsKeepOnlyKnownClasses(t *testing.T) {
+	dir := t.TempDir()
+	log := New(dir)
+	log.Record("proxy.tun_ready", "failed", 0, fmt.Errorf("private context: %w", classifiedError("tun_core_adapter")), 0)
+	log.Record("proxy.tun_mtu", "failed", 0, classifiedError("private-field"), 0)
+	log.Record("proxy.tun_core_ready", "failed", 0, context.DeadlineExceeded, 0)
+	log.Record("proxy.tun_ready", "failed", 0, classifiedError("tun_core_interface_lookup"), 0)
+
+	path := filepath.Join(t.TempDir(), "report.json")
+	if err := New(dir).Export(path, State{}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report struct{ Events []Event }
+	if err := json.Unmarshal(raw, &report); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "private") || len(report.Events) != 4 ||
+		report.Events[0].ErrorClass != "tun_core_adapter" || report.Events[1].Stage != "proxy.tun_mtu" ||
+		report.Events[1].ErrorClass != "other" || report.Events[2].Stage != "proxy.tun_core_ready" ||
+		report.Events[2].ErrorClass != "timeout" || report.Events[3].ErrorClass != "tun_core_interface_lookup" {
+		t.Fatal("the exported TUN failure lost its safe class or exposed untrusted text")
+	}
+}

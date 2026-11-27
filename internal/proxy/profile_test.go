@@ -148,6 +148,11 @@ allow-lan: true
 	if !reflect.DeepEqual(tun["sniffer"], wantSniffer) {
 		t.Fatalf("unexpected domain sniffing settings: %v", tun["sniffer"])
 	}
+	if tun["log-level"] != "info" || system["log-level"] != "silent" {
+		t.Fatal("only Windows TUN should emit its startup result")
+	}
+	delete(tun, "log-level")
+	delete(system, "log-level")
 	delete(tun, "tun")
 	delete(tun, "sniffer")
 	delete(tun, "ipv6")

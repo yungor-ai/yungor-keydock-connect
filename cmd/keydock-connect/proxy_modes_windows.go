@@ -108,8 +108,8 @@ func (ui *nativeWindow) toggleProxy() {
 	mode, current := ui.selectedProxyMode(), ui.state.ProxyMode
 	on := mode != current
 	action := proxyAction(mode, current)
-	ui.runTask(ui.proxyNotice, "正在"+action+"…", func(context.Context) error {
-		return ui.controller.SetProxyMode(on, mode)
+	ui.runTask(ui.proxyNotice, "正在"+action+"…", func(ctx context.Context) error {
+		return ui.controller.SetProxyMode(ctx, on, mode)
 	}, func(err error) {
 		if err != nil {
 			if mode != proxy.ModeTUN && current != proxy.ModeTUN {

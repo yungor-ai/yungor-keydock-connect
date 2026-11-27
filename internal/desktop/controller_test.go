@@ -32,7 +32,7 @@ type fixtureProxy struct {
 
 func (p *fixtureProxy) ActiveMode() proxy.Mode          { return p.mode }
 func (p *fixtureProxy) CheckMode(mode proxy.Mode) error { return p.checkErr[mode] }
-func (p *fixtureProxy) StartMode(_ string, mode proxy.Mode) error {
+func (p *fixtureProxy) StartMode(_ context.Context, _ string, mode proxy.Mode) error {
 	if err := p.CheckMode(mode); err != nil {
 		return err
 	}
@@ -136,7 +136,7 @@ func TestNativeEnrollmentLifecycle(t *testing.T) {
 	if err = reopened.Connect(context.Background(), address+"/other", "", nil); err == nil {
 		t.Fatal("exported device credential to another base")
 	}
-	if err = reopened.SetProxyMode(true, proxy.ModeSystem); err != nil || p.mode != proxy.ModeSystem {
+	if err = reopened.SetProxyMode(t.Context(), true, proxy.ModeSystem); err != nil || p.mode != proxy.ModeSystem {
 		t.Fatal("proxy enable failed")
 	}
 	if err = reopened.Restore(); err != nil || reopened.State().Configured {
@@ -269,23 +269,23 @@ func TestProxySwitchKeepsPreviousModeWhenTargetFails(t *testing.T) {
 	if err := c.Connect(context.Background(), address, enrollmentKey, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.SetProxyMode(true, proxy.ModeSystem); err != nil {
+	if err := c.SetProxyMode(t.Context(), true, proxy.ModeSystem); err != nil {
 		t.Fatal(err)
 	}
 	stops := p.stops
 	permissionErr := errors.New("TUN permission required")
 	p.checkErr = map[proxy.Mode]error{proxy.ModeTUN: permissionErr}
-	if err := c.SetProxyMode(true, proxy.ModeTUN); !errors.Is(err, permissionErr) || p.stops != stops || p.mode != proxy.ModeSystem {
+	if err := c.SetProxyMode(t.Context(), true, proxy.ModeTUN); !errors.Is(err, permissionErr) || p.stops != stops || p.mode != proxy.ModeSystem {
 		t.Fatalf("preflight failure interrupted the previous mode: stops=%d mode=%q err=%v", p.stops, p.mode, err)
 	}
 	p.checkErr = nil
 	startErr := errors.New("TUN could not start")
 	p.startErr = map[proxy.Mode]error{proxy.ModeTUN: startErr}
-	if err := c.SetProxyMode(true, proxy.ModeTUN); !errors.Is(err, startErr) || p.stops != stops+1 || p.mode != proxy.ModeSystem {
+	if err := c.SetProxyMode(t.Context(), true, proxy.ModeTUN); !errors.Is(err, startErr) || p.stops != stops+1 || p.mode != proxy.ModeSystem {
 		t.Fatalf("failed switch did not restore the previous mode: stops=%d mode=%q err=%v", p.stops, p.mode, err)
 	}
 	p.startErr = nil
-	if err := c.SetProxyMode(true, proxy.ModeTUN); err != nil || p.stops != stops+2 || p.mode != proxy.ModeTUN {
+	if err := c.SetProxyMode(t.Context(), true, proxy.ModeTUN); err != nil || p.stops != stops+2 || p.mode != proxy.ModeTUN {
 		t.Fatalf("switch to TUN failed: stops=%d mode=%q err=%v", p.stops, p.mode, err)
 	}
 }
@@ -299,7 +299,7 @@ func TestSubscriptionRefreshOnlyUsesActiveModeAndEnrollment(t *testing.T) {
 	if c.refreshActiveSubscription(ctx) || p.checks != 0 {
 		t.Fatal("inactive proxy requested a subscription refresh")
 	}
-	if err := c.SetProxyMode(true, proxy.ModeTUN); err != nil {
+	if err := c.SetProxyMode(t.Context(), true, proxy.ModeTUN); err != nil {
 		t.Fatal(err)
 	}
 	firstUpdatedAt := c.State().SubscriptionUpdatedAt
@@ -325,7 +325,7 @@ func TestSubscriptionRefreshOnlyUsesActiveModeAndEnrollment(t *testing.T) {
 	if updatedAt.IsZero() || updatedAt.Before(firstUpdatedAt) {
 		t.Fatal("a successful refresh did not save its update time")
 	}
-	if err := c.SetProxyMode(false, proxy.ModeTUN); err != nil {
+	if err := c.SetProxyMode(t.Context(), false, proxy.ModeTUN); err != nil {
 		t.Fatal(err)
 	}
 	if state := c.State(); state.Proxy || !state.SubscriptionCheckedAt.IsZero() || !state.SubscriptionUpdatedAt.Equal(updatedAt) {
@@ -478,5 +478,55 @@ func TestConnectDoesNotReuseCredentialWithoutSavedAddress(t *testing.T) {
 	err := c.Connect(t.Context(), "", " ", func(v Check) { stages = append(stages, v.Stage+":"+v.Status) })
 	if err == nil || !reflect.DeepEqual(stages, []string{"device:running", "device:failed"}) {
 		t.Fatalf("blank credential and missing server: err=%v stages=%v", err, stages)
+	}
+}
+
+type waitingTUNProxy struct {
+	*fixtureProxy
+	started  chan struct{}
+	testDone <-chan struct{}
+}
+
+func (p *waitingTUNProxy) StartMode(ctx context.Context, url string, mode proxy.Mode) error {
+	if mode != proxy.ModeTUN {
+		return p.fixtureProxy.StartMode(ctx, url, mode)
+	}
+	close(p.started)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-p.testDone:
+		return errors.New("test ended before proxy start was canceled")
+	}
+}
+
+func TestQuitCancelsPendingProxySwitch(t *testing.T) {
+	c, p := deviceTest(t)
+	if err := c.Connect(t.Context(), address, enrollmentKey, nil); err != nil {
+		t.Fatal(err)
+	}
+	p.mode = proxy.ModeSystem
+	waiting := &waitingTUNProxy{fixtureProxy: p, started: make(chan struct{}), testDone: t.Context().Done()}
+	c.proxy = waiting
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- c.SetProxyMode(ctx, true, proxy.ModeTUN) }()
+	select {
+	case <-waiting.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("TUN startup did not begin")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) || p.mode != "" {
+			t.Fatalf("shutdown restarted a proxy or hid cancellation: mode=%q, err=%v", p.mode, err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("TUN startup did not honor the window action cancellation")
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

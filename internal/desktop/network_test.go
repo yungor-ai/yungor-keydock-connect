@@ -16,7 +16,7 @@ type networkProxy struct {
 	active atomic.Bool
 }
 
-func (p *networkProxy) StartMode(string, proxy.Mode) error {
+func (p *networkProxy) StartMode(context.Context, string, proxy.Mode) error {
 	p.active.Store(true)
 	return nil
 }
@@ -75,7 +75,7 @@ func TestWatchNetworkReplacesStartupResultsOnProxyChange(t *testing.T) {
 		}
 	}
 	assertProbePath("direct")
-	if err := c.SetProxyMode(true, proxy.ModeSystem); err != nil {
+	if err := c.SetProxyMode(t.Context(), true, proxy.ModeSystem); err != nil {
 		t.Fatal(err)
 	}
 	assertProbePath("http://127.0.0.1:17890")

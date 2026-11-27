@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -56,7 +57,7 @@ func TestWindowsTUNRoutesAndWinINetRestore(t *testing.T) {
 	}
 	start := func() uint64 {
 		t.Helper()
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
 		defer cancel()
 		m.mu.Lock()
 		err := m.startModeProfileLocked(ctx, config, port, ModeTUN)
@@ -93,6 +94,18 @@ func TestWindowsTUNRoutesAndWinINetRestore(t *testing.T) {
 		}
 	}
 	luid := start()
+	// A real, fully configured adapter alone must not satisfy startup for a
+	// child that has yet to report completing its own TUN initialization.
+	unconfirmed := &child{}
+	if step, err := unconfirmed.pendingTUNStep(); step != nil || err != nil {
+		t.Fatalf("active TUN native checks failed: %v, %v", step, err)
+	}
+	probeCtx, cancelProbe := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	err = m.awaitTUN(probeCtx, unconfirmed)
+	cancelProbe()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("accepted native routes without core readiness: %v", err)
+	}
 	if err := m.Stop(); err != nil {
 		t.Fatal(err)
 	}

@@ -61,13 +61,15 @@ func (m *Manager) CheckMode(mode Mode) error {
 	return nil
 }
 
-func (m *Manager) Start(raw string) error { return m.StartMode(raw, ModeSystem) }
+func (m *Manager) Start(raw string) error { return m.StartMode(context.Background(), raw, ModeSystem) }
 
-func (m *Manager) StartMode(raw string, mode Mode) error {
+func (m *Manager) StartMode(ctx context.Context, raw string, mode Mode) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := m.CheckMode(mode); err != nil {
 		return err
 	}
-	ctx := context.Background()
 	if mode != ModeTUN {
 		return m.startDarwinProxy(ctx, raw, nil, localPort, mode)
 	}

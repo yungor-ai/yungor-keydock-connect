@@ -324,6 +324,8 @@ func buildRoutingProfileWithTUN(body []byte, port int, diagnostic bool, mode Mod
 	}
 	if mode == ModeTUN {
 		if tun == nil {
+			// Windows classifies the core's TUN startup result before discarding its output.
+			profile.Log = "info"
 			tun = makeTUNSettings(tunDeviceName)
 			// Apply the same MTU as Clash Verge Rev instead of Mihomo's 9000-byte default.
 			tun.MTU = windowsTUNMTU

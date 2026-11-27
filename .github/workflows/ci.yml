@@ -141,7 +141,7 @@ jobs:
           KEYDOCK_WINDOWS_TUN_E2E: "1"
         run: |
           $env:KEYDOCK_TEST_CORE = (Resolve-Path "dist/app/core/mihomo.exe").Path
-          go test -count=1 -v -ldflags="-H=windowsgui" -run '^TestWindowsTUNRoutesAndWinINetRestore$' ./internal/proxy
+          go test -count=1 -v -ldflags="-H=windowsgui" -run '^TestWindowsTUN(RoutesAndWinINetRestore|CoreStartupFailure)$' ./internal/proxy
       - name: Build Windows x64 GUI
         env:
           GOARCH: amd64

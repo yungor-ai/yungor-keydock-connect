@@ -250,7 +250,7 @@ func setMacProxyMode(ctx context.Context, controller *desktop.Controller, enable
 			return "", err
 		}
 	}
-	if err := controller.SetProxyMode(enable, mode); err != nil {
+	if err := controller.SetProxyMode(ctx, enable, mode); err != nil {
 		return "", err
 	}
 	if enable {

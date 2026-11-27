@@ -9,9 +9,9 @@ import (
 
 type child struct{ mode Mode }
 
-func (m *Manager) Start(raw string) error              { return m.StartMode(raw, ModeSystem) }
-func (m *Manager) StartMode(_ string, mode Mode) error { return m.CheckMode(mode) }
-func (m *Manager) CheckMode(Mode) error                { return errors.New("代理模式仅支持 Windows") }
+func (m *Manager) Start(raw string) error                                 { return m.StartMode(context.Background(), raw, ModeSystem) }
+func (m *Manager) StartMode(_ context.Context, _ string, mode Mode) error { return m.CheckMode(mode) }
+func (m *Manager) CheckMode(Mode) error                                   { return errors.New("代理模式仅支持 Windows") }
 func (m *Manager) Refresh(context.Context, string) error {
 	return nil
 }

@@ -24,16 +24,18 @@ var tcpTable = windows.NewLazySystemDLL("iphlpapi.dll").NewProc("GetExtendedTcpT
 const coreDigest = "5a0231811a80b27477ebdee15684b41946d01afbd2114534e9a4b256125ca147"
 
 type child struct {
-	job     windows.Handle
-	cmd     *exec.Cmd
-	done    chan struct{}
-	dataDir string
-	waitErr error // Set before done closes.
-	mode    Mode
-	port    int
-	profile []byte
-	tunLUID uint64
-	tunLock windows.Handle
+	job               windows.Handle
+	cmd               *exec.Cmd
+	done              chan struct{}
+	dataDir           string
+	waitErr           error // Set before done closes.
+	mode              Mode
+	port              int
+	profile           []byte
+	tunLUID           uint64
+	tunLock           windows.Handle
+	tunCoreReady      <-chan struct{}
+	tunStartupFailure <-chan error
 }
 
 func (m *Manager) ProxyAddress() string {
@@ -153,6 +155,14 @@ func (m *Manager) spawnCore(profile []byte, mode Mode, verifyConfig bool) (*chil
 		args = append(args, "-t")
 	}
 	cmd := exec.Command(m.corePath, args...)
+	var tunCoreReady <-chan struct{}
+	var tunStartupFailure <-chan error
+	if mode == ModeTUN && !verifyConfig {
+		capture := &tunCoreLog{ready: make(chan struct{}), failure: make(chan error, 1)}
+		tunCoreReady = capture.ready
+		tunStartupFailure = capture.failure
+		cmd.Stdout, cmd.Stderr = capture, capture
+	}
 	cmd.Dir = filepath.Dir(m.corePath)
 	flags := uint32(windows.CREATE_NO_WINDOW)
 	if mode == ModeTUN {
@@ -195,11 +205,20 @@ func (m *Manager) spawnCore(profile []byte, mode Mode, verifyConfig bool) (*chil
 	}
 	m.diagnostics.Record("proxy.core_process", "ok", processElapsed, nil, 0)
 	m.diagnostics.Record("proxy.core_job", "ok", jobElapsed, nil, 0)
-	p := &child{cmd: cmd, job: job, dataDir: dir, done: make(chan struct{}), mode: mode}
+	p := &child{cmd: cmd, job: job, dataDir: dir, done: make(chan struct{}), mode: mode, tunCoreReady: tunCoreReady, tunStartupFailure: tunStartupFailure}
 	go func() { p.waitErr = cmd.Wait(); close(p.done) }()
 	// The pinned child reads stdin before loading the network stack.
 	go func() { in.Write(profile); in.Close() }()
 	return p, nil
+}
+
+func (p *child) tunStartupError(fallback error) error {
+	select {
+	case err := <-p.tunStartupFailure:
+		return err
+	default:
+		return fallback
+	}
 }
 
 func (m *Manager) launch(ctx context.Context, profile []byte, port int, mode Mode) (*child, error) {
@@ -213,17 +232,23 @@ func (m *Manager) launch(ctx context.Context, profile []byte, port int, mode Mod
 	defer deadline.Stop()
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
+	fail := func(message, cause error) (*child, error) {
+		if coreErr := p.tunStartupError(nil); coreErr != nil {
+			message, cause = coreErr, coreErr
+		}
+		m.diagnostics.Record("proxy.core_ready", "failed", time.Since(started), cause, 0)
+		return nil, errors.Join(message, m.closeChild(p))
+	}
 	for {
 		select {
 		case <-ctx.Done():
-			m.logStage("proxy.core_ready", started, ctx.Err())
-			return nil, errors.Join(ctx.Err(), m.closeChild(p))
+			return fail(ctx.Err(), ctx.Err())
+		case err := <-p.tunStartupFailure:
+			return fail(err, err)
 		case <-p.done:
-			m.diagnostics.Record("proxy.core_ready", "failed", time.Since(started), p.waitErr, 0)
-			return nil, errors.Join(errors.New("代理核心未能加载订阅分流配置"), m.closeChild(p))
+			return fail(errors.New("代理核心未能加载订阅分流配置"), p.waitErr)
 		case <-deadline.C:
-			m.logStage("proxy.core_ready", started, context.DeadlineExceeded)
-			return nil, errors.Join(errors.New("内置代理未能及时启动"), m.closeChild(p))
+			return fail(errors.New("内置代理未能及时启动"), context.DeadlineExceeded)
 		case <-ticker.C:
 			if ownsListener(p.cmd.Process.Pid, port) {
 				m.logStage("proxy.core_ready", started, nil)
@@ -281,9 +306,12 @@ func (m *Manager) closeChild(p *child) (resultErr error) {
 	return errors.Join(exitErr, err)
 }
 
-func (m *Manager) Start(raw string) error { return m.StartMode(raw, ModeSystem) }
+func (m *Manager) Start(raw string) error { return m.StartMode(context.Background(), raw, ModeSystem) }
 
-func (m *Manager) StartMode(raw string, mode Mode) error {
+func (m *Manager) StartMode(ctx context.Context, raw string, mode Mode) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.CheckMode(mode); err != nil {
@@ -304,7 +332,6 @@ func (m *Manager) StartMode(raw string, mode Mode) error {
 		return err
 	}
 	m.pruneRuntime()
-	ctx := context.Background()
 	body, err := m.subscription(ctx, raw, nil)
 	if err != nil {
 		return err
@@ -361,7 +388,7 @@ func (m *Manager) startTUNLocked(ctx context.Context, cfg []byte, port int, lock
 	if !windows.GetCurrentProcessToken().IsElevated() {
 		return errors.New("启动 TUN 需要管理员权限")
 	}
-	if err := checkTUNStart(); err != nil {
+	if err := checkTUNStart(ctx); err != nil {
 		return err
 	}
 	p, err := m.launch(ctx, cfg, port, ModeTUN)
